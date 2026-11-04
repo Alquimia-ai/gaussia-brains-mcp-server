@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=70.1", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gaussia-brains-mcp-server"
+version = "0.1.0"
+description = "Standalone MCP + REST service for read-only Boltzmann Brain access"
+readme = "README.md"
+license = {text = "GNU General Public License v3.0"}
+authors = [{name = "Alquimia AI", email = "info@alquimia.ai"}]
+requires-python = "==3.12.*"
+classifiers = ["Private :: Do Not Upload"]
+
+dependencies = [
+    "fastapi>=0.115.12",
+    "uvicorn>=0.34.2",
+    "pydantic>=2.11.4",
+    "pydantic-settings>=2.9.1",
+    "httpx>=0.28.1",
+    "loguru>=0.7.3",
+    "mcp>=2.3,<3",
+    # Exact pin: pyboltzmann is alpha (0.x, no stability promise). Upgrades go
+    # through the compatibility matrix in docs/proposal.md §11.
+    "pyboltzmann[authenticity]==0.10.1",
+    # JWT access-token validation (RFC 7519/9068) against issuer JWKS (RFC 7517).
+    "pyjwt[crypto]>=2.10,<3",
+    "opentelemetry-sdk>=1.36.0",
+    "opentelemetry-exporter-otlp>=1.36.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.11.10",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=7.1.0",
+    "mypy>=2.1.0",
+    "httpx>=0.28.1",
+]
+
+[project.urls]
+repository = "https://github.com/alquimia-ai/gaussia-brains-mcp-server.git"
+
+[project.scripts]
+gaussia-brains-mcp-server = "gaussia_brains_mcp_server.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["gaussia_brains_mcp_server*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = ["--tb=short", "-q"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["gaussia_brains_mcp_server"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+omit = ["*/tests/*", "*/__pycache__/*"]
