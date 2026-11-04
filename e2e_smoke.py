@@ -38,12 +38,15 @@ def _env() -> dict[str, str]:
     return env
 
 
-async def _wait_for_server(timeout: float = 60.0) -> None:
+async def _wait_for_server(timeout: float = 90.0) -> None:
+    # The first catalog read can take several seconds while oras fetches the
+    # namespace index from the registry, so give each request a generous timeout.
+    await asyncio.sleep(2)
     deadline = time.time() + timeout
     async with httpx.AsyncClient() as client:
         while time.time() < deadline:
             try:
-                r = await client.get(f"{BASE}/v1/brains", timeout=2)
+                r = await client.get(f"{BASE}/v1/brains", timeout=15)
                 if r.status_code == 200:
                     return
             except Exception:
@@ -54,7 +57,7 @@ async def _wait_for_server(timeout: float = 60.0) -> None:
 
 async def main() -> int:
     log_file = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".log", prefix="gbms_e2e_", delete=False
+        mode="wb", suffix=".log", prefix="gbms_e2e_", delete=False
     )
     log_path = log_file.name
     log_file.close()
@@ -62,7 +65,7 @@ async def main() -> int:
         [sys.executable, "-m", "gaussia_brains_mcp_server.main"],
         cwd=os.path.dirname(__file__),
         env=_env(),
-        stdout=open(log_path, "w"),
+        stdout=open(log_path, "wb"),
         stderr=subprocess.STDOUT,
     )
     try:
@@ -115,8 +118,8 @@ async def main() -> int:
         except subprocess.TimeoutExpired:
             proc.kill()
         print("--- server stdout ---")
-        with open(log_path, "r", errors="replace") as f:
-            print(f.read())
+        with open(log_path, "rb") as f:
+            print(f.read().decode("utf-8", errors="replace"))
         os.unlink(log_path)
 
 
