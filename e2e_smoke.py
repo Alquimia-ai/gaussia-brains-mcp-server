@@ -6,6 +6,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 import httpx
@@ -52,11 +53,16 @@ async def _wait_for_server(timeout: float = 60.0) -> None:
 
 
 async def main() -> int:
+    log_file = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".log", prefix="gbms_e2e_", delete=False
+    )
+    log_path = log_file.name
+    log_file.close()
     proc = subprocess.Popen(
         [sys.executable, "-m", "gaussia_brains_mcp_server.main"],
         cwd=os.path.dirname(__file__),
         env=_env(),
-        stdout=subprocess.PIPE,
+        stdout=open(log_path, "w"),
         stderr=subprocess.STDOUT,
     )
     try:
@@ -108,9 +114,10 @@ async def main() -> int:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
-        if proc.stdout:
-            print("--- server stdout ---")
-            print(proc.stdout.read().decode("utf-8", errors="replace"))
+        print("--- server stdout ---")
+        with open(log_path, "r", errors="replace") as f:
+            print(f.read())
+        os.unlink(log_path)
 
 
 if __name__ == "__main__":
