@@ -14,19 +14,18 @@ from typing import Any
 
 from loguru import logger
 
-from gaussia_brains_mcp_server.client import registry_client
-from gaussia_brains_mcp_server.config import Settings
+from gaussia_brains_mcp_server.client import (
+    ENTRY_ARTIFACT_TYPE,
+    INDEX_TAG,
+    registry_client,
+)
+from gaussia_brains_mcp_server.config import Settings, SignaturePolicy
+from gaussia_brains_mcp_server.repo import expand_namespace
 from gaussia_brains_mcp_server.signatures import get_signature_verifier
-
-INDEX_ARTIFACT_TYPE = "application/vnd.alquimia.registry.index.v1"
-ENTRY_ARTIFACT_TYPE = "application/vnd.alquimia.registry.index.entry.v1"
-INDEX_TAG = "v1"
-
-_ANNOTATION_PREFIX = "ai.alquimia.registry.index"
 
 
 def _annotation(key: str) -> str:
-    return f"{_ANNOTATION_PREFIX}.{key}"
+    return f"ai.alquimia.registry.index.{key}"
 
 
 @dataclass(frozen=True)
@@ -92,6 +91,9 @@ class Catalog:
     async def _signature_summary(
         self, reference: str, digest: str
     ) -> dict[str, Any]:
+        settings = self._settings()
+        if settings.signature_policy is SignaturePolicy.OFF:
+            return {"checked": False, "trusted": False, "signers": [], "detail": None}
         report = self._verifier().inspect(f"{reference}@{digest}")
         return report.summary()
 
@@ -104,6 +106,13 @@ class Catalog:
         cursor: str | None = None,
     ) -> tuple[list[CatalogEntry], str | None]:
         """Read one namespace index and return its brain entries."""
+        settings = self._settings()
+        try:
+            namespace = expand_namespace(
+                namespace, registry_default=settings.registry_default
+            )
+        except ValueError:
+            pass
         client = self._client()
         index_reference = f"{namespace}/index"
         document, index_digest = await client.fetch_manifest(index_reference, INDEX_TAG)
@@ -216,6 +225,129 @@ class Catalog:
             "annotations": manifest.annotations,
             "signature": signature,
         }
+
+    async def publish(
+        self,
+        ref: str,
+        *,
+        tag: str | None = None,
+        description: str = "",
+        author: str = "",
+        published_at: str = "",
+    ) -> dict[str, Any]:
+        """Resolve *ref* and attach a ``kind=brain`` entry to its namespace index."""
+        from gaussia_brains_mcp_server.cache import split_reference
+        from gaussia_brains_mcp_server.repo import parse_brain_ref
+
+        settings = self._settings()
+        expanded = settings.expand_brain_ref(ref)
+        reference, parsed_tag = split_reference(expanded)
+        tag = tag or parsed_tag
+        brain_ref = parse_brain_ref(
+            ref,
+            registry_default=settings.registry_default,
+            namespace_default=settings.registry_namespace_brains,
+        )
+        namespace = f"{brain_ref.registry}/{brain_ref.namespace}"
+
+        client = self._client()
+        manifest = await client.resolve(reference, tag)
+        digest = client.last_digest or "unknown"
+
+        entry_digest = await client.attach_index_entry(
+            namespace=namespace,
+            repo=reference,
+            tag=tag,
+            digest=digest,
+            description=description,
+            author=author,
+            published_at=published_at,
+        )
+        return {
+            "reference": reference,
+            "tag": tag,
+            "digest": digest,
+            "namespace": namespace,
+            "entry_digest": entry_digest,
+            "modules": [mt.value for mt in manifest.modules],
+        }
+
+    async def unpublish(self, ref: str, *, tag: str | None = None) -> dict[str, Any]:
+        """Detach the index entry advertised for ``ref:tag`` from its namespace index."""
+        from gaussia_brains_mcp_server.cache import split_reference
+        from gaussia_brains_mcp_server.repo import parse_brain_ref
+
+        settings = self._settings()
+        expanded = settings.expand_brain_ref(ref)
+        reference, parsed_tag = split_reference(expanded)
+        tag = tag or parsed_tag
+        brain_ref = parse_brain_ref(
+            ref,
+            registry_default=settings.registry_default,
+            namespace_default=settings.registry_namespace_brains,
+        )
+        namespace = f"{brain_ref.registry}/{brain_ref.namespace}"
+
+        client = self._client()
+        removed = await client.detach_index_entry(namespace, reference, tag)
+        return {"reference": reference, "tag": tag, "namespace": namespace, "removed": removed}
+
+    async def reindex(
+        self,
+        namespace: str | None = None,
+        refs: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Rebuild index entries.
+
+        With *refs*, resolve and attach an entry for each one. Otherwise walk
+        the existing entries of *namespace* and re-attach them, refreshing their
+        metadata.
+        """
+        settings = self._settings()
+        if namespace or not refs:
+            namespace = expand_namespace(
+                namespace
+                or f"{settings.registry_default.rstrip('/')}/{settings.registry_namespace_brains}",
+                registry_default=settings.registry_default,
+            )
+        results: list[dict[str, Any]] = []
+
+        if refs:
+            for ref in refs:
+                try:
+                    info = await self.publish(ref)
+                    results.append({"ref": ref, "status": "published", **info})
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Reindex failed for {}: {}", ref, exc)
+                    results.append({"ref": ref, "status": "failed", "error": str(exc)})
+            return {"namespace": namespace, "results": results}
+
+        # No explicit refs: refresh every entry already present in the index.
+        client = self._client()
+        target_ns = namespace or settings.effective_catalog_namespaces()[0]
+        entries = await client.discover_index_entries(target_ns)
+        for entry in entries:
+            repo = entry.get("repo", "")
+            tag = entry.get("tag", "latest")
+            digest = entry.get("subject_digest") or entry.get("digest", "")
+            if not repo or not digest:
+                continue
+            try:
+                await client.attach_index_entry(
+                    namespace=target_ns,
+                    repo=repo,
+                    tag=tag,
+                    digest=digest,
+                    description=entry.get("description", ""),
+                    author=entry.get("author", ""),
+                    published_at=entry.get("published_at") or entry.get("published-at", ""),
+                    replace=True,
+                )
+                results.append({"repo": repo, "tag": tag, "status": "refreshed"})
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Refresh failed for {}:{}: {}", repo, tag, exc)
+                results.append({"repo": repo, "tag": tag, "status": "failed", "error": str(exc)})
+        return {"namespace": namespace, "refreshed": len(results), "results": results}
 
 
 def catalog(settings: Settings | None = None) -> Catalog:

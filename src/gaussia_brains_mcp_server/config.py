@@ -148,6 +148,13 @@ class Settings(BaseSettings):
     stdio_brain: str | None = None
     stdio_bearer_token: SecretStr | None = None
 
+    # ── Registry defaults for short brain refs ───────────────────────────
+    #: Default registry host used when a brain reference does not include one
+    #: (e.g. ``brains/my-brain:latest`` expands to ``registry.alquimia.ai/brains/my-brain:latest``).
+    registry_default: str = "registry.alquimia.ai"
+    #: Default publishing namespace for short brain references.
+    registry_namespace_brains: str = "brains"
+
     # ── Discovery (namespace indexes) ────────────────────────────────────
     #: ``registry/namespace`` pairs whose index (``<ns>/index:v1``) is listed.
     catalog_namespaces: list[str] = Field(default_factory=list)
@@ -156,17 +163,46 @@ class Settings(BaseSettings):
     #: server must not pull from any registry a caller happens to name.
     allowed_sources: list[str] = Field(default_factory=list)
 
+    def effective_catalog_namespaces(self) -> list[str]:
+        """Return configured catalog namespaces, defaulting to the brain namespace."""
+        if self.catalog_namespaces:
+            return [s.rstrip("/") for s in self.catalog_namespaces]
+        return [f"{self.registry_default.rstrip('/')}/{self.registry_namespace_brains}"]
+
     def effective_sources(self) -> list[str]:
-        return [
-            s.rstrip("/") for s in (self.allowed_sources or self.catalog_namespaces)
-        ]
+        sources = self.allowed_sources or self.catalog_namespaces
+        if sources:
+            return [s.rstrip("/") for s in sources]
+        return [f"{self.registry_default.rstrip('/')}/{self.registry_namespace_brains}"]
 
     def source_allowed(self, reference: str) -> bool:
         """Whether *reference* (``registry/ns/repo``, no tag) is in an allowed source."""
+        from gaussia_brains_mcp_server.repo import parse_brain_ref
+
+        try:
+            expanded = parse_brain_ref(
+                reference,
+                registry_default=self.registry_default,
+                namespace_default=self.registry_namespace_brains,
+            )
+            candidates = {reference, expanded.reference}
+        except ValueError:
+            candidates = {reference}
         return any(
-            reference == source or reference.startswith(source + "/")
+            candidate == source or candidate.startswith(source + "/")
             for source in self.effective_sources()
+            for candidate in candidates
         )
+
+    def expand_brain_ref(self, ref: str) -> str:
+        """Expand a short reference using the configured registry defaults."""
+        from gaussia_brains_mcp_server.repo import parse_brain_ref
+
+        return parse_brain_ref(
+            ref,
+            registry_default=self.registry_default,
+            namespace_default=self.registry_namespace_brains,
+        ).target
 
     # ── Brain cache ──────────────────────────────────────────────────────
     cache_ttl_seconds: float = Field(default=300.0, ge=0)
@@ -242,11 +278,10 @@ class Settings(BaseSettings):
     def startup_problems(self) -> list[str]:
         """Configuration that is valid to construct but not to serve with."""
         problems: list[str] = []
-        if not self.effective_sources():
-            problems.append(
-                "GBMS_ALLOWED_SOURCES and GBMS_CATALOG_NAMESPACES are empty: "
-                "every brain will be refused"
-            )
+        if not self.registry_default:
+            problems.append("GBMS_REGISTRY_DEFAULT is empty: short brain refs cannot be expanded")
+        if not self.registry_namespace_brains:
+            problems.append("GBMS_REGISTRY_NAMESPACE_BRAINS is empty: the default brain namespace is unknown")
         if self.auth_enabled and not self.auth_issuers:
             problems.append(
                 "GBMS_AUTH_ISSUERS is empty: no token could ever be accepted"

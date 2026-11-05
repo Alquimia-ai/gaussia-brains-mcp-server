@@ -304,10 +304,16 @@ async def test_references_outside_allowed_sources_are_refused(cache: StubCache) 
     assert cache.opens == []
 
 
-async def test_no_sources_configured_refuses_everything(clock: Clock) -> None:
-    cache = StubCache(FakeRegistry(), clock, allowed_sources=[])
-    with pytest.raises(SourceNotAllowedError, match="none configured"):
-        await cache.get_or_open(REF)
+async def test_no_sources_configured_uses_default_registry(clock: Clock) -> None:
+    cache = StubCache(FakeRegistry(), clock, allowed_sources=[], catalog_namespaces=[])
+    # Default registry/namespace is used when no sources are configured.
+    await cache.get_or_open("registry.alquimia.ai/brains/acme:v1")
+
+
+async def test_unknown_registry_is_refused_with_defaults(clock: Clock) -> None:
+    cache = StubCache(FakeRegistry(), clock, allowed_sources=[], catalog_namespaces=[])
+    with pytest.raises(SourceNotAllowedError):
+        await cache.get_or_open("evil.example.com/brains/acme:v1")
 
 
 def test_catalog_namespaces_are_the_default_sources() -> None:

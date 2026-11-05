@@ -23,15 +23,12 @@ from gaussia_brains_mcp_server.config import Settings, get_settings
 from gaussia_brains_mcp_server.mcp_server import BrainMcpAsgiApp, create_brain_server
 
 
-def _parse_brain_ref(brain_ref: str) -> tuple[str, str]:
-    """Split a request path like ``registry/ns/repo:tag`` into reference and tag."""
-    if "@" in brain_ref:
-        reference, tag = brain_ref.rsplit("@", 1)
-        return reference, tag
-    if ":" in brain_ref:
-        reference, tag = brain_ref.rsplit(":", 1)
-        return reference, tag
-    return brain_ref, "latest"
+def _parse_brain_ref(brain_ref: str, settings: Settings) -> tuple[str, str]:
+    """Expand short refs and split a brain reference into (reference, tag-or-digest)."""
+    from gaussia_brains_mcp_server.cache import split_reference
+
+    expanded = settings.expand_brain_ref(brain_ref)
+    return split_reference(expanded)
 
 
 async def _send_json(
@@ -76,7 +73,11 @@ class McpDispatchApp:
             await _send_json(send, 404, {"detail": "Brain reference required"})
             return
 
-        reference, tag = _parse_brain_ref(brain_ref)
+        try:
+            reference, tag = _parse_brain_ref(brain_ref, settings)
+        except ValueError as exc:
+            await _send_json(send, 400, {"detail": f"Invalid brain reference: {exc}"})
+            return
         if not settings.source_allowed(reference):
             await _send_json(
                 send, 403, {"detail": f"Brain source not allowed: {reference}"}
@@ -169,7 +170,10 @@ async def _run_stdio(settings: Settings) -> None:
             "GBMS_STDIO_BRAIN must be set when GBMS_MCP_TRANSPORT=stdio"
         )
 
-    reference, tag = _parse_brain_ref(brain_ref)
+    try:
+        reference, tag = _parse_brain_ref(brain_ref, settings)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid brain reference: {exc}") from exc
     if not settings.source_allowed(reference):
         raise SystemExit(f"Brain source not allowed: {reference}")
 

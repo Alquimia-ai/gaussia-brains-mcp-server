@@ -1,10 +1,11 @@
-"""Read-only OCI registry client for Boltzmann Brain artifacts.
+"""OCI registry client for Boltzmann Brain artifacts.
 
 Implements the subset of pyboltzmann's ``RegistryClient`` protocol the read
-path uses -- ``resolve``, ``list_tags``, ``pull_blob``, ``referrers`` -- by
-shelling out to the ``oras`` CLI. Snapshot authorship is judged by pyboltzmann
-(``Brain.authenticate`` / ``Brain.pull``); publisher signatures (cosign) are an
-independent, optional gate applied at manifest resolution.
+path uses -- ``resolve``, ``list_tags``, ``pull_blob``, ``referrers`` -- plus
+the namespace-index writes needed to publish, unpublish and reindex brains,
+all by shelling out to the ``oras`` CLI. Snapshot authorship is judged by
+pyboltzmann (``Brain.authenticate`` / ``Brain.pull``); publisher signatures
+(cosign) are an independent, optional gate applied at manifest resolution.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -38,6 +40,21 @@ from loguru import logger
 
 from gaussia_brains_mcp_server.config import Settings, get_settings
 from gaussia_brains_mcp_server.signatures import get_signature_verifier
+
+#: OCI artifact type for the namespace index anchor manifest.
+INDEX_ARTIFACT_TYPE = "application/vnd.alquimia.registry.index.v1"
+#: OCI artifact type for an index entry referrer.
+ENTRY_ARTIFACT_TYPE = "application/vnd.alquimia.registry.index.entry.v1"
+#: Tag the namespace index anchor is served under.
+INDEX_TAG = "v1"
+#: Schema annotation stamped on every index entry.
+_ANNOTATION_PREFIX = "ai.alquimia.registry.index"
+#: Empty config blob digest required by OCI image manifests.
+_OCI_EMPTY_BLOB = b"{}"
+_OCI_EMPTY_BLOB_DIGEST = (
+    "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+)
+_OCI_EMPTY_CONFIG_MEDIA_TYPE = "application/vnd.oci.empty.v1+json"
 
 BOLTZMANN_LAYER_MEDIA_TYPES = frozenset(
     {
@@ -93,6 +110,70 @@ def is_digest(tag: str) -> bool:
 def reference_target(reference: str, tag: str) -> str:
     """``repo:tag`` or, for a pinned digest, ``repo@sha256:...``."""
     return f"{reference}@{tag}" if is_digest(tag) else f"{reference}:{tag}"
+
+
+def _annotation(key: str) -> str:
+    return f"{_ANNOTATION_PREFIX}.{key}"
+
+
+def _entry_blob_bytes(
+    repo: str,
+    tag: str,
+    digest: str,
+    kind: str = "brain",
+    description: str = "",
+    author: str = "",
+    published_at: str = "",
+    extra: dict[str, str] | None = None,
+) -> bytes:
+    """Return canonical bytes for an index entry payload layer."""
+    payload: dict[str, Any] = {
+        "schema": "https://alquimia.ai/schema/index-entry+v1",
+        "version": "v1",
+        "repo": repo,
+        "tag": tag,
+        "digest": digest,
+        "kind": kind,
+    }
+    if description:
+        payload["description"] = description
+    if author:
+        payload["author"] = author
+    if published_at:
+        payload["published_at"] = published_at
+    if extra:
+        payload["annotations"] = extra
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _entry_annotations(
+    repo: str,
+    tag: str,
+    digest: str,
+    kind: str = "brain",
+    description: str = "",
+    author: str = "",
+    published_at: str = "",
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Return the annotation set stamped on an index entry artifact."""
+    annotations: dict[str, str] = {
+        _annotation("schema"): "https://alquimia.ai/schema/index-entry+v1",
+        _annotation("version"): "v1",
+        _annotation("repo"): repo,
+        _annotation("tag"): tag,
+        _annotation("digest"): digest,
+        _annotation("kind"): kind,
+    }
+    if description:
+        annotations[_annotation("description")] = description
+    if author:
+        annotations[_annotation("author")] = author
+    if published_at:
+        annotations[_annotation("published-at")] = published_at
+    if extra:
+        annotations.update(extra)
+    return annotations
 
 
 def manifest_digest(raw: bytes) -> str:
@@ -332,6 +413,167 @@ class GaussiaRegistryClient:
             except ValueError:
                 logger.warning("Skipping an unreadable referrer of {}", subject)
         return found
+
+    # -- Namespace index management ------------------------------------------ #
+
+    def _anchor_reference(self, namespace: str) -> str:
+        return f"{namespace}/index:{INDEX_TAG}"
+
+    async def ensure_index(self, namespace: str) -> str:
+        """Ensure the namespace index anchor exists and return its tag reference."""
+        anchor = self._anchor_reference(namespace)
+        repository = f"{namespace}/index"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "empty.json"
+            config_path.write_bytes(_OCI_EMPTY_BLOB)
+            manifest_path = Path(tmp) / "anchor.json"
+            manifest: dict[str, Any] = {
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "artifactType": INDEX_ARTIFACT_TYPE,
+                "config": {
+                    "mediaType": _OCI_EMPTY_CONFIG_MEDIA_TYPE,
+                    "digest": _OCI_EMPTY_BLOB_DIGEST,
+                    "size": len(_OCI_EMPTY_BLOB),
+                },
+                "layers": [],
+                "annotations": {"org.opencontainers.image.created": "1970-01-01T00:00:00Z"},
+            }
+            manifest_path.write_bytes(
+                json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            )
+            await self._oras.run(
+                "blob", "push", repository, str(config_path),
+                what=f"upload empty config to {repository}",
+            )
+            await self._oras.run(
+                "manifest", "push", anchor, str(manifest_path),
+                "--media-type", "application/vnd.oci.image.manifest.v1+json",
+                what=f"ensure index anchor {anchor}",
+            )
+        return anchor
+
+    async def attach_index_entry(
+        self,
+        namespace: str,
+        repo: str,
+        tag: str,
+        digest: str,
+        *,
+        description: str = "",
+        author: str = "",
+        published_at: str = "",
+        replace: bool = True,
+    ) -> str | None:
+        """Attach a ``kind=brain`` index entry for ``repo:tag`` to the namespace anchor.
+
+        Returns the digest of the created entry artifact, if reported by ORAS.
+        """
+        anchor = await self.ensure_index(namespace)
+        if replace:
+            await self.detach_index_entry(namespace, repo, tag, quiet=True)
+
+        payload_bytes = _entry_blob_bytes(
+            repo=repo,
+            tag=tag,
+            digest=digest,
+            description=description,
+            author=author,
+            published_at=published_at,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            payload_path = Path(tmp) / "entry.json"
+            payload_path.write_bytes(payload_bytes)
+            args = [
+                "attach",
+                "--artifact-type", ENTRY_ARTIFACT_TYPE,
+                "--distribution-spec", "v1.1-referrers-api",
+                anchor,
+                f"entry.json:{ENTRY_ARTIFACT_TYPE}+json",
+            ]
+            for key, value in _entry_annotations(
+                repo=repo,
+                tag=tag,
+                digest=digest,
+                description=description,
+                author=author,
+                published_at=published_at,
+            ).items():
+                args += ["--annotation", f"{key}={value}"]
+            stdout = await self._oras.run(*args, what=f"attach index entry to {anchor}")
+
+        matches = re.findall(r"sha256:[0-9a-f]{64}", (stdout or ""))
+        return matches[-1] if matches else None
+
+    async def detach_index_entry(
+        self, namespace: str, repo: str, tag: str, *, quiet: bool = False
+    ) -> int:
+        """Detach whatever the index advertises at ``repo:tag``.
+
+        Returns the number of entry manifests removed.
+        """
+        try:
+            document, index_digest = await self.fetch_manifest(
+                f"{namespace}/index", INDEX_TAG
+            )
+        except ReferenceNotFoundError:
+            return 0
+
+        referrers = await self.referrers(
+            f"{namespace}/index", OciDigest.parse(index_digest), artifact_type=ENTRY_ARTIFACT_TYPE
+        )
+        removed = 0
+        for descriptor in referrers:
+            annotations = descriptor.annotations or {}
+            if (
+                annotations.get(_annotation("repo")) == repo
+                and annotations.get(_annotation("tag")) == tag
+            ):
+                target = f"{namespace}/index@{descriptor.digest}"
+                try:
+                    await self._oras.run(
+                        "manifest", "delete", "-f", target,
+                        what=f"detach index entry {target}",
+                    )
+                    removed += 1
+                except DistributionError as exc:
+                    if not quiet:
+                        raise
+                    logger.debug("Could not detach {}: {}", target, exc)
+        return removed
+
+    async def discover_index_entries(
+        self, namespace: str
+    ) -> list[dict[str, Any]]:
+        """Return descriptors for every index entry attached to the namespace anchor."""
+        try:
+            document, index_digest = await self.fetch_manifest(
+                f"{namespace}/index", INDEX_TAG
+            )
+        except ReferenceNotFoundError:
+            return []
+        referrers = await self.referrers(
+            f"{namespace}/index", OciDigest.parse(index_digest), artifact_type=ENTRY_ARTIFACT_TYPE
+        )
+        entries: list[dict[str, Any]] = []
+        for descriptor in referrers:
+            annotations = descriptor.annotations or {}
+            if annotations.get(_annotation("kind")) != "brain":
+                continue
+            entries.append(
+                {
+                    "digest": str(descriptor.digest),
+                    "repo": annotations.get(_annotation("repo"), ""),
+                    "tag": annotations.get(_annotation("tag"), ""),
+                    "entry_digest": str(descriptor.digest),
+                    "description": annotations.get(_annotation("description"), ""),
+                    "author": annotations.get(_annotation("author"), ""),
+                    "published_at": annotations.get(_annotation("published-at")),
+                    "subject_digest": annotations.get(_annotation("digest")),
+                }
+            )
+        return entries
 
 
 def registry_client(

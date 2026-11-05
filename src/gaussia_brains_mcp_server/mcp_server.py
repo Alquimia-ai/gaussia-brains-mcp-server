@@ -34,7 +34,7 @@ from gaussia_brains_mcp_server.auth.scopes import ALL as ALL_SCOPES
 from gaussia_brains_mcp_server.auth.scopes import READ
 from gaussia_brains_mcp_server.cache import BrainCache
 from gaussia_brains_mcp_server.client import registry_client
-from gaussia_brains_mcp_server.config import Settings
+from gaussia_brains_mcp_server.config import Settings, SignaturePolicy
 from gaussia_brains_mcp_server.errors import describe_brain_error
 from gaussia_brains_mcp_server.guidance import (
     BrainContext,
@@ -76,6 +76,8 @@ async def _fetch_metadata(
 async def _signature_report(
     settings: Settings, target: str
 ) -> SignatureReport | None:
+    if settings.signature_policy is SignaturePolicy.OFF:
+        return None
     verifier = get_signature_verifier(settings)
     try:
         return verifier.inspect(target)

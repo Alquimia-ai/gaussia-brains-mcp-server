@@ -15,8 +15,9 @@ from mcp import Client
 
 PORT = 8123
 BASE = f"http://127.0.0.1:{PORT}"
-BRAIN = "registry.alquimia.ai/brains/bpd-brain-2:latest"
-MCP_URL = f"{BASE}/mcp/{BRAIN}"
+BRAIN_SHORT = "brains/bpd-brain-2:latest"
+BRAIN_FULL = "registry.alquimia.ai/brains/bpd-brain-2:latest"
+MCP_URL = f"{BASE}/mcp/{BRAIN_SHORT}"
 
 
 def _env() -> dict[str, str]:
@@ -28,6 +29,7 @@ def _env() -> dict[str, str]:
             "GBMS_CATALOG_NAMESPACES": '["registry.alquimia.ai/brains"]',
             "GBMS_ALLOWED_SOURCES": '["registry.alquimia.ai/brains"]',
             "GBMS_VERIFY_UNSIGNED": "permit",
+            "GBMS_SIGNATURE_POLICY": "off",
             "GBMS_MCP_TRANSPORT": "streamable-http",
             "GBMS_MCP_PATH": "/mcp",
             "GBMS_PORT": str(PORT),
@@ -55,6 +57,61 @@ async def _wait_for_server(timeout: float = 90.0) -> None:
     raise RuntimeError("server did not start")
 
 
+async def _test_rest(client: httpx.AsyncClient) -> None:
+    logger.info("Testing REST list...")
+    r = await client.get(f"{BASE}/v1/brains", timeout=15)
+    assert r.status_code == 200, f"list failed: {r.status_code} {r.text}"
+    data = r.json()
+    assert "entries" in data
+    logger.info("REST list returned {} entries", len(data["entries"]))
+
+    logger.info("Testing REST detail with short ref...")
+    r = await client.get(f"{BASE}/v1/brains/{BRAIN_SHORT}", timeout=15)
+    assert r.status_code == 200, f"detail failed: {r.status_code} {r.text}"
+    detail = r.json()
+    assert detail["reference"] == "registry.alquimia.ai/brains/bpd-brain-2"
+    assert detail["signature"]["checked"] is False
+    logger.info("REST detail digest: {}", detail["digest"])
+
+
+async def _test_mcp() -> None:
+    logger.info("Testing MCP connection with short ref {}...", BRAIN_SHORT)
+    async with Client(server=MCP_URL, raise_exceptions=True) as client:
+        info = client.server_info
+        assert info is not None
+        logger.info("Connected: {} {}", info.name, info.version)
+        instructions = client.instructions or ""
+        logger.info("Instructions: {}", instructions[:200])
+
+        tools = await client.list_tools()
+        tool_names = [t.name for t in tools.tools]
+        logger.info("Tools: {}", tool_names)
+        assert "brain_search" in tool_names
+        assert "brain_read_block" in tool_names
+        assert "brain_resolve" in tool_names
+
+        logger.info("Calling brain_search...")
+        result = await client.call_tool(
+            "brain_search", {"query": "BPD", "limit": 3}
+        )
+        logger.info(
+            "Search result: {}",
+            result.model_dump() if hasattr(result, "model_dump") else result,
+        )
+
+        prompts = await client.list_prompts()
+        prompt_names = [p.name for p in prompts.prompts]
+        logger.info("Prompts: {}", prompt_names)
+        assert "answer_from_brain" in prompt_names
+        assert "explore_brain" in prompt_names
+
+        logger.info("Calling brain_resolve...")
+        resolve_result = await client.call_tool("brain_resolve", {})
+        logger.info("Resolve result: {}", resolve_result)
+        # Signatures are disabled for this test run.
+        assert "checked: false" in str(resolve_result).lower() or "false" in str(resolve_result)
+
+
 async def main() -> int:
     log_file = tempfile.NamedTemporaryFile(
         mode="wb", suffix=".log", prefix="gbms_e2e_", delete=False
@@ -73,41 +130,10 @@ async def main() -> int:
         await _wait_for_server()
         logger.info("Server ready")
 
-        async with Client(
-            server=MCP_URL,
-            raise_exceptions=True,
-        ) as client:
-            info = client.server_info
-            assert info is not None
-            logger.info("Connected: {} {}", info.name, info.version)
-            instructions = client.instructions or ""
-            logger.info("Instructions: {}", instructions[:200])
+        async with httpx.AsyncClient() as client:
+            await _test_rest(client)
 
-            tools = await client.list_tools()
-            tool_names = [t.name for t in tools.tools]
-            logger.info("Tools: {}", tool_names)
-            assert "brain_search" in tool_names
-            assert "brain_read_block" in tool_names
-            assert "brain_resolve" in tool_names
-
-            logger.info("Calling brain_search...")
-            result = await client.call_tool(
-                "brain_search", {"query": "BPD", "limit": 3}
-            )
-            logger.info(
-                "Search result: {}",
-                result.model_dump() if hasattr(result, "model_dump") else result,
-            )
-
-            prompts = await client.list_prompts()
-            prompt_names = [p.name for p in prompts.prompts]
-            logger.info("Prompts: {}", prompt_names)
-            assert "answer_from_brain" in prompt_names
-            assert "explore_brain" in prompt_names
-
-            logger.info("Calling brain_resolve...")
-            resolve_result = await client.call_tool("brain_resolve", {})
-            logger.info("Resolve result: {}", resolve_result)
+        await _test_mcp()
 
         logger.info("E2E smoke test passed")
         return 0

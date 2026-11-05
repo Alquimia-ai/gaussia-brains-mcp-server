@@ -12,5 +12,7 @@ from __future__ import annotations
 READ = "brains:read"
 #: List brains in the namespace indexes over REST.
 CATALOG = "brains:catalog"
+#: Publish, unpublish, and reindex brains in the namespace index over REST.
+PUBLISH = "brains:publish"
 
-ALL = (READ, CATALOG)
+ALL = (READ, CATALOG, PUBLISH)
