@@ -292,6 +292,16 @@ class Catalog:
         removed = await client.detach_index_entry(namespace, reference, tag)
         return {"reference": reference, "tag": tag, "namespace": namespace, "removed": removed}
 
+    async def list_tags(self, ref: str) -> list[str]:
+        """Return every tag published for *ref* (repository-level, unfiltered)."""
+        from gaussia_brains_mcp_server.cache import split_reference
+
+        settings = self._settings()
+        expanded = settings.expand_brain_ref(ref)
+        reference, tag = split_reference(expanded)
+        client = self._client()
+        return await client.list_tags(reference)
+
     async def reindex(
         self,
         namespace: str | None = None,
