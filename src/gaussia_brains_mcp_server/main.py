@@ -151,6 +151,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(brains_router)
     app.mount(mcp_path, McpDispatchApp(app))
 
+    @app.get("/healthz")
+    async def _healthz() -> dict[str, Any]:
+        """Liveness/readiness probe."""
+        return {"status": "ok", "version": __version__}
+
     @app.exception_handler(HTTPException)
     async def _http_exception_handler(_request: Any, exc: HTTPException) -> JSONResponse:
         return JSONResponse(

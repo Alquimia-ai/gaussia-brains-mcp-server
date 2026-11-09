@@ -114,6 +114,19 @@ async def brain_manifest_legacy(
     return await cat.manifest_detail(expanded)
 
 
+@router.get("/{brain_ref:path}/tags")
+async def brain_tags(
+    brain_ref: str,
+    principal: Annotated[Principal, Depends(require_scopes(CATALOG))],
+    settings: Settings = Depends(get_settings),  # noqa: B008
+) -> dict[str, Any]:
+    """Return every tag published for a brain repository."""
+    cat = catalog(settings)
+    expanded = settings.expand_brain_ref(brain_ref)
+    tags = await cat.list_tags(expanded)
+    return {"reference": expanded.split("@", 1)[0].rsplit(":", 1)[0], "tags": tags}
+
+
 @router.get("/{brain_ref:path}")
 async def get_brain(
     brain_ref: str,
