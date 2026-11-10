@@ -104,6 +104,7 @@ async def reindex_brains(
 
 @router.get("/manifest")
 async def brain_manifest_legacy(
+    request: Request,
     principal: Annotated[Principal, Depends(require_scopes(CATALOG))],
     ref: Annotated[str, Query(description="Brain reference, with tag or digest")],
     settings: Settings = Depends(get_settings),  # noqa: B008
@@ -111,7 +112,7 @@ async def brain_manifest_legacy(
     """Legacy query-param detail endpoint; prefer ``GET /v1/brains/{brain_ref}``."""
     cat = catalog(settings)
     expanded = settings.expand_brain_ref(ref)
-    return await cat.manifest_detail(expanded)
+    return await cat.manifest_detail(expanded, base_url=_mcp_base_url(request, settings))
 
 
 @router.get("/{brain_ref:path}/tags")
@@ -129,6 +130,7 @@ async def brain_tags(
 
 @router.get("/{brain_ref:path}")
 async def get_brain(
+    request: Request,
     brain_ref: str,
     principal: Annotated[Principal, Depends(require_scopes(CATALOG))],
     settings: Settings = Depends(get_settings),  # noqa: B008
@@ -140,7 +142,7 @@ async def get_brain(
     """
     cat = catalog(settings)
     expanded = settings.expand_brain_ref(brain_ref)
-    return await cat.manifest_detail(expanded)
+    return await cat.manifest_detail(expanded, base_url=_mcp_base_url(request, settings))
 
 
 @router.post("/{brain_ref:path}/publish")

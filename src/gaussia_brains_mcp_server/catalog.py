@@ -202,7 +202,7 @@ class Catalog:
         return entries, next_cursor
 
     async def manifest_detail(
-        self, ref: str, *, tag: str | None = None
+        self, ref: str, *, tag: str | None = None, base_url: str | None = None
     ) -> dict[str, Any]:
         """Resolve a brain reference and return its manifest-level detail."""
         from gaussia_brains_mcp_server.cache import split_reference
@@ -217,6 +217,10 @@ class Catalog:
         except Exception as exc:
             signature = {"checked": False, "trusted": False, "signers": [], "detail": str(exc)}
 
+        mcp_base = (base_url or self._settings().mcp_path).rstrip("/")
+        mcp_pinned = f"{mcp_base}/{reference}@{digest}"
+        mcp_follow = f"{mcp_base}/{reference}:{tag}"
+
         return {
             "reference": reference,
             "tag": tag,
@@ -224,6 +228,10 @@ class Catalog:
             "modules": [mt.value for mt in manifest.modules],
             "annotations": manifest.annotations,
             "signature": signature,
+            "mcp": {
+                "pinned": mcp_pinned,
+                "follow": mcp_follow,
+            },
         }
 
     async def publish(
