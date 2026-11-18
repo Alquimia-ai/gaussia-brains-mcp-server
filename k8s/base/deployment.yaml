@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaussia-brains-mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gaussia-brains-mcp-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gaussia-brains-mcp-server
+        alquimia.ai/component: brains-mcp
+    spec:
+      serviceAccountName: gaussia-brains-mcp-server
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: server
+          image: gaussia-brains-mcp-server
+          ports:
+            - { name: http, containerPort: 8000 }
+          envFrom:
+            - configMapRef: { name: gaussia-brains-mcp-server }
+            # Optional: GBMS_REGISTRY_USERNAME / GBMS_REGISTRY_PASSWORD / GBMS_COSIGN_KEY.
+            - secretRef: { name: gaussia-brains-mcp-server, optional: true }
+          env:
+            - { name: HOME, value: /tmp }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            # Roughly 8 KiB of heap per block, times GBMS_CACHE_MAX_BRAINS loaded brains.
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            # oras pulls into temporary directories.
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }

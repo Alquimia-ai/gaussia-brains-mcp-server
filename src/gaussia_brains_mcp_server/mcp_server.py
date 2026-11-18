@@ -73,9 +73,7 @@ async def _fetch_metadata(
     return {}
 
 
-async def _signature_report(
-    settings: Settings, target: str
-) -> SignatureReport | None:
+async def _signature_report(settings: Settings, target: str) -> SignatureReport | None:
     if settings.signature_policy is SignaturePolicy.OFF:
         return None
     verifier = get_signature_verifier(settings)
@@ -122,13 +120,21 @@ def _context(
 def _tool_error(message: str, code: str = "INTERNAL") -> types.CallToolResult:
     return types.CallToolResult(
         is_error=True,
-        content=[types.TextContent(type="text", text=json.dumps({"code": code, "message": message}))],
+        content=[
+            types.TextContent(
+                type="text", text=json.dumps({"code": code, "message": message})
+            )
+        ],
     )
 
 
 def _ok_text(data: Any) -> types.CallToolResult:
     return types.CallToolResult(
-        content=[types.TextContent(type="text", text=json.dumps(data, ensure_ascii=False, default=str))]
+        content=[
+            types.TextContent(
+                type="text", text=json.dumps(data, ensure_ascii=False, default=str)
+            )
+        ]
     )
 
 
@@ -147,8 +153,12 @@ async def _handle_search(
     raw_types = arguments.get("memory_types")
     filters: dict[str, Any] = {}
     if raw_types is not None:
-        if not isinstance(raw_types, list) or not all(isinstance(t, str) for t in raw_types):
-            return _tool_error("memory_types must be a list of strings", "MEMORY_TYPE_INVALID")
+        if not isinstance(raw_types, list) or not all(
+            isinstance(t, str) for t in raw_types
+        ):
+            return _tool_error(
+                "memory_types must be a list of strings", "MEMORY_TYPE_INVALID"
+            )
         try:
             filters["memory_types"] = _parse_memory_types(raw_types)
         except ValueError as exc:
@@ -223,21 +233,6 @@ async def _handle_read_block(
     )
 
 
-async def _handle_resolve(ctx: BrainContext) -> types.CallToolResult:
-    report = ctx.signature_report
-    authorship = ctx.brain._authorship()
-    return _ok_text(
-        {
-            "reference": ctx.reference,
-            "tag": ctx.tag,
-            "digest": ctx.digest,
-            "modules": [mt.value for mt in ctx.manifest.modules],
-            "signature": report.summary() if report else {"checked": False},
-            "authorship": authorship.model_dump(mode="json") if authorship else None,
-        }
-    )
-
-
 async def _on_call_tool(
     request_context: ServerRequestContext[BrainContext],
     params: types.CallToolRequestParams,
@@ -248,8 +243,6 @@ async def _on_call_tool(
             return await _handle_search(ctx, params.arguments or {})
         if params.name == "brain_read_block":
             return await _handle_read_block(ctx, params.arguments or {})
-        if params.name == "brain_resolve":
-            return await _handle_resolve(ctx)
         return _tool_error(f"unknown tool: {params.name}", "INTERNAL")
     except Exception as exc:  # pragma: no cover
         logger.exception("tool {} failed", params.name)
@@ -262,9 +255,7 @@ async def _on_list_tools(
     _params: types.PaginatedRequestParams | None,
 ) -> types.ListToolsResult:
     ctx = _context(request_context)
-    tools = [
-        types.Tool.model_validate(t) for t in build_tools(ctx)
-    ]
+    tools = [types.Tool.model_validate(t) for t in build_tools(ctx)]
     return types.ListToolsResult(tools=tools)
 
 
@@ -387,7 +378,9 @@ async def _send_json(
     ]
     if headers:
         all_headers.extend(headers)
-    await send({"type": "http.response.start", "status": status_code, "headers": all_headers})
+    await send(
+        {"type": "http.response.start", "status": status_code, "headers": all_headers}
+    )
     await send({"type": "http.response.body", "body": payload})
 
 
@@ -476,7 +469,10 @@ class BrainMcpAsgiApp:
     async def _send_challenge(
         self, send: Send, error: str, description: str, status_code: int = 401
     ) -> None:
-        parts = [f'error="{error}"', f'error_description="{description.replace(chr(34), chr(39))}"']
+        parts = [
+            f'error="{error}"',
+            f'error_description="{description.replace(chr(34), chr(39))}"',
+        ]
         if self.resource_metadata_url:
             parts.append(f'resource_metadata="{self.resource_metadata_url}"')
         await _send_json(
@@ -496,6 +492,9 @@ class BrainMcpAsgiApp:
         await _send_json(
             send,
             403,
-            {"error": "insufficient_scope", "error_description": f"Required scope: {READ}"},
+            {
+                "error": "insufficient_scope",
+                "error_description": f"Required scope: {READ}",
+            },
             headers=[(b"www-authenticate", ("Bearer " + ", ".join(parts)).encode())],
         )

@@ -1,0 +1,18 @@
+# Ingress from the runtime (MCP) and Studio (catalog), nothing else. Adjust the selectors to the
+# namespaces they run in. Egress is left open: oras must reach the OCI registry and the issuer's JWKS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gaussia-brains-mcp-server
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gaussia-brains-mcp-server
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: alquimia
+      ports:
+        - { port: http }

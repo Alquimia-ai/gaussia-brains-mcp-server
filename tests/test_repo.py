@@ -79,10 +79,7 @@ def test_expand_namespace_short_form() -> None:
 
 
 def test_expand_namespace_full_form_unchanged() -> None:
-    assert (
-        expand_namespace("registry.example.com/acme")
-        == "registry.example.com/acme"
-    )
+    assert expand_namespace("registry.example.com/acme") == "registry.example.com/acme"
 
 
 def test_invalid_reference_raises() -> None:

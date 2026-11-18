@@ -162,6 +162,12 @@ class Settings(BaseSettings):
     #: ``catalog_namespaces``. Both empty refuses every brain: a headless
     #: server must not pull from any registry a caller happens to name.
     allowed_sources: list[str] = Field(default_factory=list)
+    #: Seconds a namespace index listing is reused before the anchor is read
+    #: again. Publishing through this server invalidates it at once; ``0``
+    #: reads the anchor on every request.
+    catalog_index_ttl_seconds: float = Field(default=10.0, ge=0)
+    #: Index entries enriched in parallel (legacy manifest reads, signatures).
+    catalog_concurrency: int = Field(default=8, ge=1)
 
     def effective_catalog_namespaces(self) -> list[str]:
         """Return configured catalog namespaces, defaulting to the brain namespace."""
@@ -279,9 +285,13 @@ class Settings(BaseSettings):
         """Configuration that is valid to construct but not to serve with."""
         problems: list[str] = []
         if not self.registry_default:
-            problems.append("GBMS_REGISTRY_DEFAULT is empty: short brain refs cannot be expanded")
+            problems.append(
+                "GBMS_REGISTRY_DEFAULT is empty: short brain refs cannot be expanded"
+            )
         if not self.registry_namespace_brains:
-            problems.append("GBMS_REGISTRY_NAMESPACE_BRAINS is empty: the default brain namespace is unknown")
+            problems.append(
+                "GBMS_REGISTRY_NAMESPACE_BRAINS is empty: the default brain namespace is unknown"
+            )
         if self.auth_enabled and not self.auth_issuers:
             problems.append(
                 "GBMS_AUTH_ISSUERS is empty: no token could ever be accepted"

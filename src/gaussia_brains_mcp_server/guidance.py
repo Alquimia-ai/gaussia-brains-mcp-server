@@ -47,7 +47,11 @@ def _module_name(mt: MemoryType) -> str:
 
 def _title(ctx: BrainContext) -> str:
     md = ctx.metadata or {}
-    return md.get("title") or ctx.manifest.annotations.get("org.opencontainers.image.title") or ctx.reference
+    return (
+        md.get("title")
+        or ctx.manifest.annotations.get("org.opencontainers.image.title")
+        or ctx.reference
+    )
 
 
 def _description(ctx: BrainContext) -> str:
@@ -79,8 +83,7 @@ def build_instructions(ctx: BrainContext) -> str:
     """MCP server instructions for the brain currently being served."""
     modules = ctx.manifest.modules
     module_lines = "\n".join(
-        f"- {_module_name(mt)} ({mt.value}): {_MODULE_MEANING[mt]}"
-        for mt in modules
+        f"- {_module_name(mt)} ({mt.value}): {_MODULE_MEANING[mt]}" for mt in modules
     )
 
     return f"""You are connected to the brain "{_title(ctx)}".
@@ -155,13 +158,6 @@ def _read_block_tool_schema() -> dict[str, Any]:
     }
 
 
-def _resolve_tool_schema() -> dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": {},
-    }
-
-
 def build_tools(ctx: BrainContext) -> list[dict[str, Any]]:
     """Tool definitions for ``on_list_tools``."""
     modules = ctx.manifest.modules
@@ -184,14 +180,6 @@ def build_tools(ctx: BrainContext) -> list[dict[str, Any]]:
             ),
             "inputSchema": _read_block_tool_schema(),
         },
-        {
-            "name": "brain_resolve",
-            "description": (
-                "Return metadata about the connected brain: digest, tag, modules, "
-                "signature report and authorship state."
-            ),
-            "inputSchema": _resolve_tool_schema(),
-        },
     ]
 
 
@@ -205,7 +193,9 @@ def build_prompts() -> list[dict[str, Any]]:
         {
             "name": "answer_from_brain",
             "description": "Answer a question by searching the brain, reading cited blocks, and citing them.",
-            "arguments": [_prompt_argument("question", "The question to answer from the brain.")],
+            "arguments": [
+                _prompt_argument("question", "The question to answer from the brain.")
+            ],
         },
         {
             "name": "explore_brain",

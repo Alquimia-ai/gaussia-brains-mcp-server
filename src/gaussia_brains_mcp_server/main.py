@@ -44,7 +44,9 @@ async def _send_json(
     ]
     if headers:
         all_headers.extend(headers)
-    await send({"type": "http.response.start", "status": status_code, "headers": all_headers})
+    await send(
+        {"type": "http.response.start", "status": status_code, "headers": all_headers}
+    )
     await send({"type": "http.response.body", "body": payload})
 
 
@@ -68,7 +70,7 @@ class McpDispatchApp:
         root_path = scope.get("root_path", "")
         path = scope["path"]
         prefix = root_path.rstrip("/") + "/"
-        brain_ref = path[len(prefix):] if path.startswith(prefix) else path.lstrip("/")
+        brain_ref = path[len(prefix) :] if path.startswith(prefix) else path.lstrip("/")
         if not brain_ref:
             await _send_json(send, 404, {"detail": "Brain reference required"})
             return
@@ -157,7 +159,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok", "version": __version__}
 
     @app.exception_handler(HTTPException)
-    async def _http_exception_handler(_request: Any, exc: HTTPException) -> JSONResponse:
+    async def _http_exception_handler(
+        _request: Any, exc: HTTPException
+    ) -> JSONResponse:
         return JSONResponse(
             status_code=exc.status_code,
             content={"detail": exc.detail},
@@ -171,9 +175,7 @@ async def _run_stdio(settings: Settings) -> None:
     """Run a single-brain MCP server over stdio."""
     brain_ref = settings.stdio_brain
     if not brain_ref:
-        raise SystemExit(
-            "GBMS_STDIO_BRAIN must be set when GBMS_MCP_TRANSPORT=stdio"
-        )
+        raise SystemExit("GBMS_STDIO_BRAIN must be set when GBMS_MCP_TRANSPORT=stdio")
 
     try:
         reference, tag = _parse_brain_ref(brain_ref, settings)

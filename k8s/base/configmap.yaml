@@ -1,0 +1,21 @@
+# Every setting is a GBMS_* variable (src/gaussia_brains_mcp_server/config.py). Lists are JSON.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gaussia-brains-mcp-server
+data:
+  GBMS_LOG_LEVEL: INFO
+  GBMS_PORT: "8000"
+  GBMS_MCP_PATH: /mcp
+  # Where brains may come from. Empty fails closed.
+  GBMS_CATALOG_NAMESPACES: '["registry.alquimia.ai/brains"]'
+  GBMS_ALLOWED_SOURCES: '["registry.alquimia.ai/brains"]'
+  GBMS_REGISTRY_DEFAULT: registry.alquimia.ai
+  GBMS_REGISTRY_NAMESPACE_BRAINS: brains
+  GBMS_CACHE_MAX_BRAINS: "4"
+  # off | warn | required
+  GBMS_SIGNATURE_POLICY: "off"
+  # OAuth resource server: the audience tokens are issued for, and the issuers trusted.
+  GBMS_AUTH_ENABLED: "true"
+  GBMS_AUTH_RESOURCE: http://gaussia-brains-mcp-server.brains.svc.cluster.local:8000
+  GBMS_AUTH_ISSUERS: '[]'

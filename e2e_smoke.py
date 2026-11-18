@@ -88,7 +88,7 @@ async def _test_mcp() -> None:
         logger.info("Tools: {}", tool_names)
         assert "brain_search" in tool_names
         assert "brain_read_block" in tool_names
-        assert "brain_resolve" in tool_names
+        assert "brain_resolve" not in tool_names
 
         logger.info("Calling brain_search...")
         result = await client.call_tool(
@@ -104,12 +104,6 @@ async def _test_mcp() -> None:
         logger.info("Prompts: {}", prompt_names)
         assert "answer_from_brain" in prompt_names
         assert "explore_brain" in prompt_names
-
-        logger.info("Calling brain_resolve...")
-        resolve_result = await client.call_tool("brain_resolve", {})
-        logger.info("Resolve result: {}", resolve_result)
-        # Signatures are disabled for this test run.
-        assert "checked: false" in str(resolve_result).lower() or "false" in str(resolve_result)
 
 
 async def main() -> int:

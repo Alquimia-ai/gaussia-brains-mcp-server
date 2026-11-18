@@ -48,7 +48,7 @@ The service replaces the brain read path in `alquimia-core` and `alquimia-runtim
                                                                           ▼
  Agent  ── MCP (Bearer JWT) ──►  /mcp/<ns>/handbook@sha256:…   ◄── agent config stores URL
           initialize → instructions about *this* brain
-          tools: brain_search · brain_read_block · brain_resolve
+          tools: brain_search · brain_read_block
 ```
 
 ---
@@ -147,9 +147,8 @@ The rules are carried over from the runtime's `_brain_search_tool` description, 
 |------|-------|--------|
 | `brain_search` | `query`, `memory_types?`, `limit=10`, `expand_depth=0` | Verified blocks: `block_id`, `memory_type`, `content` (text), `score`, `source`, `locator`, `resolvable`. Unverified blocks are dropped; canonical blocks render their source passage. |
 | `brain_read_block` | `block_id` | The block (`Brain.resolve`) with provenance. |
-| `brain_resolve` | n/a | Digest, tag, modules, signature report, authorship state. |
 
-All three require `brains:read`.
+Both require `brains:read`. Brain metadata (digest, modules, signature report) is served by `GET /v1/brains/{ref}`, not over MCP.
 
 ### 4.4 Errors
 

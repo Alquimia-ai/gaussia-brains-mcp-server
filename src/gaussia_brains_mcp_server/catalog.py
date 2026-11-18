@@ -2,23 +2,25 @@
 
 Brains are listed from the registry namespace index (``<ns>/index:v1``), the
 same mechanism agentspaces use. Each entry is an OCI referrer of the index
-anchor; this module reads ``kind=brain`` entries, resolves the advertised
-digest, verifies the publisher signature and returns both pinned and follow
-MCP URLs.
+anchor carrying repo, tag, digest, description and modules as annotations, so
+one ``oras discover`` on the anchor lists a whole namespace. Brain manifests are
+read only for legacy entries published without a ``modules`` annotation, and
+that result is cached by digest (a digest's content never changes).
 """
 
 from __future__ import annotations
 
+import asyncio
+import threading
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
+from boltzmann.distribution.manifest import Descriptor
 from loguru import logger
 
-from gaussia_brains_mcp_server.client import (
-    ENTRY_ARTIFACT_TYPE,
-    INDEX_TAG,
-    registry_client,
-)
+from gaussia_brains_mcp_server.client import registry_client, repo_path
 from gaussia_brains_mcp_server.config import Settings, SignaturePolicy
 from gaussia_brains_mcp_server.repo import expand_namespace
 from gaussia_brains_mcp_server.signatures import get_signature_verifier
@@ -26,6 +28,59 @@ from gaussia_brains_mcp_server.signatures import get_signature_verifier
 
 def _annotation(key: str) -> str:
     return f"ai.alquimia.registry.index.{key}"
+
+
+class _IndexCache:
+    """Process-wide memo of index listings (short TTL) and modules per digest."""
+
+    def __init__(self, max_digests: int = 4096) -> None:
+        self._lock = threading.Lock()
+        self._listings: dict[str, tuple[float, list[Descriptor]]] = {}
+        self._modules: OrderedDict[str, list[str]] = OrderedDict()
+        self._max = max_digests
+
+    def listing(self, namespace: str, ttl: float) -> list[Descriptor] | None:
+        if ttl <= 0:
+            return None
+        with self._lock:
+            hit = self._listings.get(namespace)
+        if hit is None or time.monotonic() - hit[0] >= ttl:
+            return None
+        return list(hit[1])
+
+    def store_listing(self, namespace: str, entries: list[Descriptor]) -> None:
+        with self._lock:
+            self._listings[namespace] = (time.monotonic(), entries)
+
+    def invalidate(self, namespace: str | None = None) -> None:
+        with self._lock:
+            if namespace is None:
+                self._listings.clear()
+            else:
+                self._listings.pop(namespace, None)
+
+    def modules(self, digest: str) -> list[str] | None:
+        with self._lock:
+            found = self._modules.get(digest)
+            if found is not None:
+                self._modules.move_to_end(digest)
+            return list(found) if found is not None else None
+
+    def store_modules(self, digest: str, modules: list[str]) -> None:
+        with self._lock:
+            self._modules[digest] = modules
+            self._modules.move_to_end(digest)
+            while len(self._modules) > self._max:
+                self._modules.popitem(last=False)
+
+
+_index_cache = _IndexCache()
+
+
+def _split_modules(raw: str | None) -> list[str] | None:
+    if raw is None:
+        return None
+    return [m for m in (part.strip() for part in raw.split(",")) if m]
 
 
 @dataclass(frozen=True)
@@ -80,22 +135,118 @@ class Catalog:
 
     @staticmethod
     def _entry_reference(namespace: str, repo: str) -> str | None:
-        """Return the full reference if *repo* belongs to *namespace*, else None."""
+        """Return the full reference if *repo* belongs to *namespace*, else None.
+
+        *repo* may be registry-relative (``brains/x``) or fully qualified.
+        """
         host, ns_path = Catalog._split_namespace(namespace)
+        repo = repo_path(namespace, repo)
         if not ns_path:
             return f"{host}/{repo}"
         if repo == ns_path or repo.startswith(f"{ns_path}/"):
             return f"{host}/{repo}"
         return None
 
-    async def _signature_summary(
-        self, reference: str, digest: str
-    ) -> dict[str, Any]:
+    async def _signature_summary(self, reference: str, digest: str) -> dict[str, Any]:
         settings = self._settings()
         if settings.signature_policy is SignaturePolicy.OFF:
             return {"checked": False, "trusted": False, "signers": [], "detail": None}
-        report = self._verifier().inspect(f"{reference}@{digest}")
+        report = await asyncio.to_thread(
+            self._verifier().inspect, f"{reference}@{digest}"
+        )
         return report.summary()
+
+    async def _index(self, client: Any, namespace: str) -> list[Descriptor]:
+        """The namespace's index entries: one ``oras discover`` on the anchor."""
+        ttl = self._settings().catalog_index_ttl_seconds
+        cached = _index_cache.listing(namespace, ttl)
+        if cached is not None:
+            return cached
+        entries = await client.index_entries(namespace)
+        _index_cache.store_listing(namespace, entries)
+        return entries
+
+    async def _modules(
+        self, client: Any, reference: str, digest: str, advertised: str | None
+    ) -> list[str]:
+        """Modules from the entry annotation; legacy entries read the manifest."""
+        modules = _split_modules(advertised)
+        if modules is not None:
+            return modules
+        cached = _index_cache.modules(digest)
+        if cached is not None:
+            return cached
+        modules = await client.manifest_modules(reference, digest)
+        _index_cache.store_modules(digest, modules)
+        return modules
+
+    async def _enrich(
+        self,
+        client: Any,
+        namespace: str,
+        descriptor: Descriptor,
+        *,
+        base_url: str,
+        gate: asyncio.Semaphore,
+    ) -> CatalogEntry | None:
+        """Turn one index entry into a :class:`CatalogEntry`, or None to skip it."""
+        annotations = descriptor.annotations or {}
+        repo = annotations.get(_annotation("repo"), "")
+        tag = annotations.get(_annotation("tag"), "latest")
+        entry_digest = annotations.get(_annotation("digest"), "")
+        reference = self._entry_reference(namespace, repo)
+        if reference is None:
+            logger.debug(
+                "Ignoring index entry {} for namespace {}: repo {} is outside the namespace",
+                descriptor.digest,
+                namespace,
+                repo,
+            )
+            return None
+        if not entry_digest:
+            logger.debug("Ignoring index entry {} with no digest", descriptor.digest)
+            return None
+
+        async with gate:
+            try:
+                modules = await self._modules(
+                    client,
+                    reference,
+                    entry_digest,
+                    annotations.get(_annotation("modules")),
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Could not resolve advertised digest {} for {}: {}",
+                    entry_digest,
+                    reference,
+                    exc,
+                )
+                return None
+            try:
+                signature = await self._signature_summary(reference, entry_digest)
+            except Exception as exc:
+                logger.debug("Signature check failed for {}: {}", reference, exc)
+                signature = {
+                    "checked": False,
+                    "trusted": False,
+                    "signers": [],
+                    "detail": str(exc),
+                }
+
+        mcp_base = base_url.rstrip("/")
+        return CatalogEntry(
+            reference=reference,
+            tag=tag,
+            digest=entry_digest,
+            description=annotations.get(_annotation("description"), ""),
+            published_at=annotations.get(_annotation("published-at")),
+            claimed_author=annotations.get(_annotation("author")),
+            signature=signature,
+            modules=modules,
+            mcp_pinned=f"{mcp_base}/{reference}@{entry_digest}",
+            mcp_follow=f"{mcp_base}/{reference}:{tag}",
+        )
 
     async def list_entries(
         self,
@@ -105,7 +256,12 @@ class Catalog:
         limit: int = 20,
         cursor: str | None = None,
     ) -> tuple[list[CatalogEntry], str | None]:
-        """Read one namespace index and return its brain entries."""
+        """Read one namespace index and return its brain entries.
+
+        Everything comes from the index anchor's entries; entries are enriched
+        concurrently, in index order. The cursor is the digest of the last entry
+        returned.
+        """
         settings = self._settings()
         try:
             namespace = expand_namespace(
@@ -114,91 +270,38 @@ class Catalog:
         except ValueError:
             pass
         client = self._client()
-        index_reference = f"{namespace}/index"
-        document, index_digest = await client.fetch_manifest(index_reference, INDEX_TAG)
-        referrers = await client.referrers(
-            index_reference, index_digest, artifact_type=ENTRY_ARTIFACT_TYPE
-        )
+        descriptors = await self._index(client, namespace)
 
-        # Pagination is cursor-based on referrer digest; for now we page by digest.
+        candidates = [
+            d
+            for d in descriptors
+            if (d.annotations or {}).get(_annotation("kind")) == "brain"
+        ]
+        if cursor is not None:
+            positions = [i for i, d in enumerate(candidates) if str(d.digest) == cursor]
+            candidates = candidates[positions[0] + 1 :] if positions else []
+
+        gate = asyncio.Semaphore(settings.catalog_concurrency)
         entries: list[CatalogEntry] = []
-        seen = 0
-        started = cursor is None
         next_cursor: str | None = None
-
-        for descriptor in referrers:
-            digest = descriptor.digest
-            if not started:
-                if digest == cursor:
-                    started = True
-                continue
-
-            annotations = descriptor.annotations or {}
-            if annotations.get(_annotation("kind")) != "brain":
-                continue
-
-            repo = annotations.get(_annotation("repo"), "")
-            tag = annotations.get(_annotation("tag"), "latest")
-            entry_digest = annotations.get(_annotation("digest"), "")
-            description = annotations.get(_annotation("description"), "")
-            published_at = annotations.get(_annotation("published-at"))
-            claimed_author = annotations.get(_annotation("author"))
-
-            reference = self._entry_reference(namespace, repo)
-            if reference is None:
-                logger.debug(
-                    "Ignoring index entry {} for namespace {}: repo {} is outside the namespace",
-                    digest,
-                    namespace,
-                    repo,
-                )
-                continue
-
-            if not entry_digest:
-                logger.debug("Ignoring index entry {} with no digest", digest)
-                continue
-
-            try:
-                manifest = await client.resolve(reference, entry_digest)
-                modules = [mt.value for mt in manifest.modules]
-            except Exception as exc:
-                logger.debug(
-                    "Could not resolve advertised digest {} for {}: {}",
-                    entry_digest,
-                    reference,
-                    exc,
-                )
-                continue
-
-            try:
-                signature = await self._signature_summary(reference, entry_digest)
-            except Exception as exc:
-                logger.debug("Signature check failed for {}: {}", reference, exc)
-                signature = {"checked": False, "trusted": False, "signers": [], "detail": str(exc)}
-
-            mcp_base = base_url.rstrip("/")
-            mcp_pinned = f"{mcp_base}/{reference}@{entry_digest}"
-            mcp_follow = f"{mcp_base}/{reference}:{tag}"
-
-            entries.append(
-                CatalogEntry(
-                    reference=reference,
-                    tag=tag,
-                    digest=entry_digest,
-                    description=description,
-                    published_at=published_at,
-                    claimed_author=claimed_author,
-                    signature=signature,
-                    modules=modules,
-                    mcp_pinned=mcp_pinned,
-                    mcp_follow=mcp_follow,
+        # Enrich in batches of what is still needed: entries that fail to
+        # resolve are skipped, so a batch may come back short.
+        while candidates and len(entries) < limit:
+            batch, candidates = (
+                candidates[: limit - len(entries)],
+                candidates[limit - len(entries) :],
+            )
+            enriched = await asyncio.gather(
+                *(
+                    self._enrich(client, namespace, d, base_url=base_url, gate=gate)
+                    for d in batch
                 )
             )
-            seen += 1
-            if seen >= limit:
-                next_cursor = digest
-                break
-
+            for descriptor, entry in zip(batch, enriched, strict=True):
+                if entry is not None:
+                    entries.append(entry)
+                    if len(entries) >= limit:
+                        next_cursor = str(descriptor.digest)
         return entries, next_cursor
 
     async def manifest_detail(
@@ -215,7 +318,12 @@ class Catalog:
         try:
             signature = await self._signature_summary(reference, digest)
         except Exception as exc:
-            signature = {"checked": False, "trusted": False, "signers": [], "detail": str(exc)}
+            signature = {
+                "checked": False,
+                "trusted": False,
+                "signers": [],
+                "detail": str(exc),
+            }
 
         mcp_base = (base_url or self._settings().mcp_path).rstrip("/")
         mcp_pinned = f"{mcp_base}/{reference}@{digest}"
@@ -270,7 +378,9 @@ class Catalog:
             description=description,
             author=author,
             published_at=published_at,
+            modules=[mt.value for mt in manifest.modules],
         )
+        _index_cache.invalidate(namespace)
         return {
             "reference": reference,
             "tag": tag,
@@ -298,7 +408,13 @@ class Catalog:
 
         client = self._client()
         removed = await client.detach_index_entry(namespace, reference, tag)
-        return {"reference": reference, "tag": tag, "namespace": namespace, "removed": removed}
+        _index_cache.invalidate(namespace)
+        return {
+            "reference": reference,
+            "tag": tag,
+            "namespace": namespace,
+            "removed": removed,
+        }
 
     async def list_tags(self, ref: str) -> list[str]:
         """Return every tag published for *ref* (repository-level, unfiltered)."""
@@ -343,28 +459,44 @@ class Catalog:
         # No explicit refs: refresh every entry already present in the index.
         client = self._client()
         target_ns = namespace or settings.effective_catalog_namespaces()[0]
-        entries = await client.discover_index_entries(target_ns)
-        for entry in entries:
-            repo = entry.get("repo", "")
-            tag = entry.get("tag", "latest")
-            digest = entry.get("subject_digest") or entry.get("digest", "")
-            if not repo or not digest:
-                continue
-            try:
-                await client.attach_index_entry(
-                    namespace=target_ns,
-                    repo=repo,
-                    tag=tag,
-                    digest=digest,
-                    description=entry.get("description", ""),
-                    author=entry.get("author", ""),
-                    published_at=entry.get("published_at") or entry.get("published-at", ""),
-                    replace=True,
-                )
-                results.append({"repo": repo, "tag": tag, "status": "refreshed"})
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Refresh failed for {}:{}: {}", repo, tag, exc)
-                results.append({"repo": repo, "tag": tag, "status": "failed", "error": str(exc)})
+        try:
+            entries = await client.discover_index_entries(target_ns)
+            for entry in entries:
+                repo = entry.get("repo", "")
+                tag = entry.get("tag", "latest")
+                digest = entry.get("subject_digest") or entry.get("digest", "")
+                if not repo or not digest:
+                    continue
+                try:
+                    reference = self._entry_reference(target_ns, repo) or repo
+                    modules = await self._modules(
+                        client, reference, digest, entry.get("modules") or None
+                    )
+                    await client.attach_index_entry(
+                        namespace=target_ns,
+                        repo=repo,
+                        tag=tag,
+                        digest=digest,
+                        description=entry.get("description", ""),
+                        author=entry.get("author", ""),
+                        published_at=entry.get("published_at")
+                        or entry.get("published-at", ""),
+                        modules=modules,
+                        replace=True,
+                    )
+                    results.append({"repo": repo, "tag": tag, "status": "refreshed"})
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Refresh failed for {}:{}: {}", repo, tag, exc)
+                    results.append(
+                        {
+                            "repo": repo,
+                            "tag": tag,
+                            "status": "failed",
+                            "error": str(exc),
+                        }
+                    )
+        finally:
+            _index_cache.invalidate(target_ns)
         return {"namespace": namespace, "refreshed": len(results), "results": results}
 
 

@@ -116,6 +116,17 @@ def _annotation(key: str) -> str:
     return f"{_ANNOTATION_PREFIX}.{key}"
 
 
+def repo_path(namespace: str, repo: str) -> str:
+    """*repo* without the registry host of *namespace* (``brains/x``).
+
+    Index entries name repositories relative to the registry; accept a fully
+    qualified reference too, so both spellings address the same entry.
+    """
+    host = namespace.partition("/")[0]
+    prefix = f"{host}/"
+    return repo[len(prefix) :] if host and repo.startswith(prefix) else repo
+
+
 def _entry_blob_bytes(
     repo: str,
     tag: str,
@@ -125,6 +136,7 @@ def _entry_blob_bytes(
     author: str = "",
     published_at: str = "",
     extra: dict[str, str] | None = None,
+    modules: list[str] | None = None,
 ) -> bytes:
     """Return canonical bytes for an index entry payload layer."""
     payload: dict[str, Any] = {
@@ -141,6 +153,8 @@ def _entry_blob_bytes(
         payload["author"] = author
     if published_at:
         payload["published_at"] = published_at
+    if modules:
+        payload["modules"] = list(modules)
     if extra:
         payload["annotations"] = extra
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -155,6 +169,7 @@ def _entry_annotations(
     author: str = "",
     published_at: str = "",
     extra: dict[str, str] | None = None,
+    modules: list[str] | None = None,
 ) -> dict[str, str]:
     """Return the annotation set stamped on an index entry artifact."""
     annotations: dict[str, str] = {
@@ -171,6 +186,8 @@ def _entry_annotations(
         annotations[_annotation("author")] = author
     if published_at:
         annotations[_annotation("published-at")] = published_at
+    if modules:
+        annotations[_annotation("modules")] = ",".join(modules)
     if extra:
         annotations.update(extra)
     return annotations
@@ -209,11 +226,13 @@ class Oras:
             return s.registry_password.get_secret_value()
         return None
 
-    async def run(self, *args: str, what: str) -> str:
+    async def run(self, *args: str, what: str, cwd: str | Path | None = None) -> str:
         """Run ``oras <args>`` and return stdout as text."""
-        return (await self.run_bytes(*args, what=what)).decode()
+        return (await self.run_bytes(*args, what=what, cwd=cwd)).decode()
 
-    async def run_bytes(self, *args: str, what: str) -> bytes:
+    async def run_bytes(
+        self, *args: str, what: str, cwd: str | Path | None = None
+    ) -> bytes:
         """Run ``oras <args>`` and return stdout exactly as emitted.
 
         Bytes, not text: a manifest's digest is the hash of the bytes the
@@ -229,6 +248,7 @@ class Oras:
                 capture_output=True,
                 check=True,
                 timeout=timeout,
+                cwd=str(cwd) if cwd is not None else None,
             )
         except subprocess.TimeoutExpired as exc:
             raise DistributionError(f"timed out after {timeout}s {what}") from exc
@@ -334,6 +354,33 @@ class GaussiaRegistryClient:
             self._pinned[target] = manifest
         return manifest
 
+    async def manifest_modules(self, reference: str, digest: str) -> list[str]:
+        """Memory modules of the brain at ``reference@digest``.
+
+        A cheap read for listings: the manifest is checked against its digest
+        and the brain profile, but no publisher-signature gate runs (callers
+        report signatures separately).
+        """
+        target = reference_target(reference, digest)
+        raw = await self._oras.run_bytes(
+            "manifest", "fetch", target, what=f"resolving {target}"
+        )
+        if not raw.strip():
+            raise ReferenceNotFoundError(f"no manifest found for {target}")
+        served = manifest_digest(raw)
+        if is_digest(digest) and served != digest:
+            raise BrainManifestRejected(
+                f"{target} served a manifest hashing to {served}"
+            )
+        try:
+            document = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise BrainManifestRejected(
+                f"{target} manifest is not JSON: {exc}"
+            ) from exc
+        validate_manifest_document(document, target)
+        return [mt.value for mt in parse_manifest(raw).modules]
+
     async def list_tags(self, reference: str) -> list[str]:
         """Every tag held by *reference* (unfiltered; ``oras`` follows pagination)."""
         raw = await self._oras.run(
@@ -379,17 +426,21 @@ class GaussiaRegistryClient:
         A referrer listing is shared space, so entries are parsed only once
         they claim the requested type and one unreadable entry hides nothing.
         """
-        args = ["discover", f"{reference}@{subject}", "--format", "json"]
+        return await self._discover(f"{reference}@{subject}", artifact_type)
+
+    async def _discover(
+        self, target: str, artifact_type: str | None
+    ) -> list[Descriptor]:
+        """``oras discover`` on *target* (a tag or a digest reference)."""
+        args = ["discover", target, "--format", "json"]
         if artifact_type is not None:
             args += ["--artifact-type", artifact_type]
-        raw = await self._oras.run(
-            *args, what=f"listing referrers of {reference}@{subject}"
-        )
+        raw = await self._oras.run(*args, what=f"listing referrers of {target}")
         try:
             listing = json.loads(raw) if raw.strip() else []
         except json.JSONDecodeError as exc:
             raise DistributionError(
-                f"referrer listing of {subject} is not JSON: {exc}"
+                f"referrer listing of {target} is not JSON: {exc}"
             ) from exc
         # ORAS >= 1.2 reports "referrers"; older builds emit an index with "manifests".
         entries = (
@@ -411,13 +462,27 @@ class GaussiaRegistryClient:
                     )
                 )
             except ValueError:
-                logger.warning("Skipping an unreadable referrer of {}", subject)
+                logger.warning("Skipping an unreadable referrer of {}", target)
         return found
 
     # -- Namespace index management ------------------------------------------ #
 
     def _anchor_reference(self, namespace: str) -> str:
         return f"{namespace}/index:{INDEX_TAG}"
+
+    async def index_entries(self, namespace: str) -> list[Descriptor]:
+        """Every entry attached to the namespace index anchor, in one call.
+
+        ``oras discover`` resolves the anchor tag itself, so the anchor
+        manifest is not fetched separately. A namespace with no index yet has
+        no entries.
+        """
+        try:
+            return await self._discover(
+                self._anchor_reference(namespace), ENTRY_ARTIFACT_TYPE
+            )
+        except ReferenceNotFoundError:
+            return []
 
     async def ensure_index(self, namespace: str) -> str:
         """Ensure the namespace index anchor exists and return its tag reference."""
@@ -438,18 +503,29 @@ class GaussiaRegistryClient:
                     "size": len(_OCI_EMPTY_BLOB),
                 },
                 "layers": [],
-                "annotations": {"org.opencontainers.image.created": "1970-01-01T00:00:00Z"},
+                "annotations": {
+                    "org.opencontainers.image.created": "1970-01-01T00:00:00Z"
+                },
             }
             manifest_path.write_bytes(
-                json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
             )
             await self._oras.run(
-                "blob", "push", repository, str(config_path),
+                "blob",
+                "push",
+                repository,
+                str(config_path),
                 what=f"upload empty config to {repository}",
             )
             await self._oras.run(
-                "manifest", "push", anchor, str(manifest_path),
-                "--media-type", "application/vnd.oci.image.manifest.v1+json",
+                "manifest",
+                "push",
+                anchor,
+                str(manifest_path),
+                "--media-type",
+                "application/vnd.oci.image.manifest.v1+json",
                 what=f"ensure index anchor {anchor}",
             )
         return anchor
@@ -464,12 +540,14 @@ class GaussiaRegistryClient:
         description: str = "",
         author: str = "",
         published_at: str = "",
+        modules: list[str] | None = None,
         replace: bool = True,
     ) -> str | None:
         """Attach a ``kind=brain`` index entry for ``repo:tag`` to the namespace anchor.
 
         Returns the digest of the created entry artifact, if reported by ORAS.
         """
+        repo = repo_path(namespace, repo)
         anchor = await self.ensure_index(namespace)
         if replace:
             await self.detach_index_entry(namespace, repo, tag, quiet=True)
@@ -481,14 +559,17 @@ class GaussiaRegistryClient:
             description=description,
             author=author,
             published_at=published_at,
+            modules=modules,
         )
         with tempfile.TemporaryDirectory() as tmp:
             payload_path = Path(tmp) / "entry.json"
             payload_path.write_bytes(payload_bytes)
             args = [
                 "attach",
-                "--artifact-type", ENTRY_ARTIFACT_TYPE,
-                "--distribution-spec", "v1.1-referrers-api",
+                "--artifact-type",
+                ENTRY_ARTIFACT_TYPE,
+                "--distribution-spec",
+                "v1.1-referrers-api",
                 anchor,
                 f"entry.json:{ENTRY_ARTIFACT_TYPE}+json",
             ]
@@ -499,9 +580,14 @@ class GaussiaRegistryClient:
                 description=description,
                 author=author,
                 published_at=published_at,
+                modules=modules,
             ).items():
                 args += ["--annotation", f"{key}={value}"]
-            stdout = await self._oras.run(*args, what=f"attach index entry to {anchor}")
+            stdout = await self._oras.run(
+                *args,
+                what=f"attach index entry to {anchor}",
+                cwd=tmp,
+            )
 
         matches = re.findall(r"sha256:[0-9a-f]{64}", (stdout or ""))
         return matches[-1] if matches else None
@@ -513,27 +599,21 @@ class GaussiaRegistryClient:
 
         Returns the number of entry manifests removed.
         """
-        try:
-            document, index_digest = await self.fetch_manifest(
-                f"{namespace}/index", INDEX_TAG
-            )
-        except ReferenceNotFoundError:
-            return 0
-
-        referrers = await self.referrers(
-            f"{namespace}/index", OciDigest.parse(index_digest), artifact_type=ENTRY_ARTIFACT_TYPE
-        )
+        repo = repo_path(namespace, repo)
         removed = 0
-        for descriptor in referrers:
+        for descriptor in await self.index_entries(namespace):
             annotations = descriptor.annotations or {}
             if (
-                annotations.get(_annotation("repo")) == repo
+                repo_path(namespace, annotations.get(_annotation("repo"), "")) == repo
                 and annotations.get(_annotation("tag")) == tag
             ):
                 target = f"{namespace}/index@{descriptor.digest}"
                 try:
                     await self._oras.run(
-                        "manifest", "delete", "-f", target,
+                        "manifest",
+                        "delete",
+                        "-f",
+                        target,
                         what=f"detach index entry {target}",
                     )
                     removed += 1
@@ -543,21 +623,10 @@ class GaussiaRegistryClient:
                     logger.debug("Could not detach {}: {}", target, exc)
         return removed
 
-    async def discover_index_entries(
-        self, namespace: str
-    ) -> list[dict[str, Any]]:
+    async def discover_index_entries(self, namespace: str) -> list[dict[str, Any]]:
         """Return descriptors for every index entry attached to the namespace anchor."""
-        try:
-            document, index_digest = await self.fetch_manifest(
-                f"{namespace}/index", INDEX_TAG
-            )
-        except ReferenceNotFoundError:
-            return []
-        referrers = await self.referrers(
-            f"{namespace}/index", OciDigest.parse(index_digest), artifact_type=ENTRY_ARTIFACT_TYPE
-        )
         entries: list[dict[str, Any]] = []
-        for descriptor in referrers:
+        for descriptor in await self.index_entries(namespace):
             annotations = descriptor.annotations or {}
             if annotations.get(_annotation("kind")) != "brain":
                 continue
@@ -571,6 +640,7 @@ class GaussiaRegistryClient:
                     "author": annotations.get(_annotation("author"), ""),
                     "published_at": annotations.get(_annotation("published-at")),
                     "subject_digest": annotations.get(_annotation("digest")),
+                    "modules": annotations.get(_annotation("modules"), ""),
                 }
             )
         return entries

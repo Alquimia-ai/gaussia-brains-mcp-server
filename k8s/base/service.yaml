@@ -1,0 +1,13 @@
+# Deliberately not labelled alquimia.ai/mcp-server=true: this is one MCP endpoint per brain
+# (/mcp/<brain-ref>), connected through Studio's Brains flow, not cluster MCP discovery.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaussia-brains-mcp-server
+  labels:
+    alquimia.ai/component: brains-mcp
+spec:
+  selector:
+    app.kubernetes.io/name: gaussia-brains-mcp-server
+  ports:
+    - { name: http, port: 8000, targetPort: http }

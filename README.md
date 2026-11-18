@@ -4,7 +4,7 @@ Serves [Boltzmann Brains](https://pypi.org/project/pyboltzmann/) to agents over 
 
 1. A publisher pushes a brain to an OCI registry and adds it to the namespace index.
 2. A user lists brains (`GET /v1/brains`), sees signature status, and picks one for an agent — pinned to a digest or following a tag.
-3. The agent connects to that brain's MCP endpoint and gets `brain_search`, `brain_read_block`, and `brain_resolve`. The server generates instructions and prompts that explain how to use them. There is no listing and no modification over MCP.
+3. The agent connects to that brain's MCP endpoint and gets `brain_search` and `brain_read_block`. The server generates instructions and prompts that explain how to use them. There is no listing and no modification over MCP.
 
 ## Status
 
@@ -47,6 +47,12 @@ GBMS_ALLOWED_SOURCES='["registry.alquimia.ai/brains"]'
 # Default registry used to expand short refs like brains/name:tag
 GBMS_REGISTRY_DEFAULT=registry.alquimia.ai
 GBMS_REGISTRY_NAMESPACE_BRAINS=brains
+
+# Discovery reads the namespace index anchor (<ns>/index:v1) in one call.
+# Seconds a listing is reused (publish/unpublish here invalidate it; 0 = always read)
+GBMS_CATALOG_INDEX_TTL_SECONDS=10
+# Entries enriched in parallel (legacy entries without a modules annotation, signatures)
+GBMS_CATALOG_CONCURRENCY=8
 
 # Publisher-signature verification (feature flag: off | warn | required)
 GBMS_SIGNATURE_POLICY=off
@@ -101,8 +107,10 @@ The transport is Streamable HTTP. Each endpoint exposes:
 
 - `brain_search` — semantic/procedural search over the brain.
 - `brain_read_block` — fetch and return a single block by id.
-- `brain_resolve` — manifest, digest, modules, and signature status.
 - Prompts: `answer_from_brain`, `explore_brain`.
+
+Brain metadata (digest, modules, signature status, MCP URLs) is not an MCP tool;
+read it from `GET /v1/brains/{ref}`.
 
 ## Brain references
 

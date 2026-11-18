@@ -44,14 +44,20 @@ def _mcp_base_url(request: Request, settings: Settings) -> str:
 async def list_brains(
     request: Request,
     principal: Annotated[Principal, Depends(require_scopes(CATALOG))],
-    namespace: Annotated[str | None, Query(description="Namespace index to read")] = None,
+    namespace: Annotated[
+        str | None, Query(description="Namespace index to read")
+    ] = None,
     cursor: Annotated[str | None, Query(description="Opaque pagination cursor")] = None,
-    limit: Annotated[int, Query(ge=1, le=100, description="Maximum entries to return")] = 20,
+    limit: Annotated[
+        int, Query(ge=1, le=100, description="Maximum entries to return")
+    ] = 20,
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> dict[str, Any]:
     """List brains from namespace indexes with verified signer information."""
     cat = catalog(settings)
-    namespaces = [namespace] if namespace else list(settings.effective_catalog_namespaces())
+    namespaces = (
+        [namespace] if namespace else list(settings.effective_catalog_namespaces())
+    )
     base_url = _mcp_base_url(request, settings)
 
     all_entries: list[dict[str, Any]] = []
@@ -112,7 +118,9 @@ async def brain_manifest_legacy(
     """Legacy query-param detail endpoint; prefer ``GET /v1/brains/{brain_ref}``."""
     cat = catalog(settings)
     expanded = settings.expand_brain_ref(ref)
-    return await cat.manifest_detail(expanded, base_url=_mcp_base_url(request, settings))
+    return await cat.manifest_detail(
+        expanded, base_url=_mcp_base_url(request, settings)
+    )
 
 
 @router.get("/{brain_ref:path}/tags")
@@ -142,7 +150,9 @@ async def get_brain(
     """
     cat = catalog(settings)
     expanded = settings.expand_brain_ref(brain_ref)
-    return await cat.manifest_detail(expanded, base_url=_mcp_base_url(request, settings))
+    return await cat.manifest_detail(
+        expanded, base_url=_mcp_base_url(request, settings)
+    )
 
 
 @router.post("/{brain_ref:path}/publish")

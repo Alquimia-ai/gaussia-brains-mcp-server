@@ -24,7 +24,7 @@ async def main() -> int:
         logger.info("Tools: {}", tool_names)
         assert "brain_search" in tool_names
         assert "brain_read_block" in tool_names
-        assert "brain_resolve" in tool_names
+        assert "brain_resolve" not in tool_names
 
         logger.info("Calling brain_search...")
         result = await client.call_tool("brain_search", {"query": "BPD", "limit": 3})
@@ -35,10 +35,6 @@ async def main() -> int:
         logger.info("Prompts: {}", prompt_names)
         assert "answer_from_brain" in prompt_names
         assert "explore_brain" in prompt_names
-
-        logger.info("Calling brain_resolve...")
-        resolve_result = await client.call_tool("brain_resolve", {})
-        logger.info("Resolve result: {}", resolve_result)
 
     logger.info("E2E smoke test passed")
     return 0

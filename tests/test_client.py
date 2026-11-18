@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 from gaussia_brains_mcp_server.client import (
+    ENTRY_ARTIFACT_TYPE,
     BrainManifestRejected,
     GaussiaRegistryClient,
     Oras,
@@ -29,7 +32,9 @@ def test_oras_transport_flags_follow_the_subcommand() -> None:
 def test_registry_password_goes_through_stdin_not_argv() -> None:
     from pydantic import SecretStr
 
-    oras = Oras(Settings(registry_username="bot", registry_password=SecretStr("s3cret")))
+    oras = Oras(
+        Settings(registry_username="bot", registry_password=SecretStr("s3cret"))
+    )
     argv = oras.argv("repo", "tags", "r/x")
     assert "s3cret" not in argv
     assert argv[-3:] == ["--username", "bot", "--password-stdin"]
@@ -71,3 +76,51 @@ async def test_pinned_digest_must_match_served_bytes(monkeypatch) -> None:
     monkeypatch.setattr(client._oras, "run_bytes", fake_fetch)
     with pytest.raises(BrainManifestRejected, match="hashing to"):
         await client.resolve("r/x", DIGEST)
+
+
+async def test_attach_index_entry_runs_in_temp_dir(monkeypatch) -> None:
+    """The entry payload is written to a temp dir, so oras must run there.
+
+    Regression: a relative ``entry.json`` was resolved against the process
+    working directory (``/app`` in the container), and an absolute path is
+    rejected by ``oras attach`` for security. We keep the relative file name
+    and set the subprocess cwd to the temp directory.
+    """
+    client = GaussiaRegistryClient(settings=Settings())
+    captured: dict[str, Any] = {}
+
+    async def fake_ensure_index(namespace: str) -> str:
+        return "registry.example/brains/index:v1"
+
+    async def fake_detach_index_entry(
+        namespace: str, repo: str, tag: str, *, quiet: bool = False
+    ) -> int:
+        return 0
+
+    async def fake_run(*args: str, what: str, cwd: str | None = None) -> str:
+        captured["args"] = args
+        captured["what"] = what
+        captured["cwd"] = cwd
+        return f"Attached digest: sha256:{'b' * 64}"
+
+    monkeypatch.setattr(client, "ensure_index", fake_ensure_index)
+    monkeypatch.setattr(client, "detach_index_entry", fake_detach_index_entry)
+    monkeypatch.setattr(client._oras, "run", fake_run)
+
+    result = await client.attach_index_entry(
+        namespace="registry.example/brains",
+        repo="registry.example/brains/foo",
+        tag="latest",
+        digest=DIGEST,
+    )
+
+    file_args = [
+        a for a in captured["args"] if a.endswith(f":{ENTRY_ARTIFACT_TYPE}+json")
+    ]
+    assert len(file_args) == 1
+    assert file_args[0] == f"entry.json:{ENTRY_ARTIFACT_TYPE}+json"
+    assert captured["cwd"] is not None
+    assert (
+        "entry.json" in Path(captured["cwd"]).name.lower() or "tmp" in captured["cwd"]
+    )
+    assert result == f"sha256:{'b' * 64}"
