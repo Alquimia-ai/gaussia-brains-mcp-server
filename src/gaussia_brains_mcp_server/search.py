@@ -6,9 +6,13 @@ Besides the matches it reports what limited the answer:
 
 * ``truncated`` -- the planner cut results at ``limit``;
 * ``narrowing`` -- requested memory types the brain does not hold, and whether
-  semantic (vector) search took part. Without an embeddings endpoint, or with
-  vectors embedded by another model, a natural-language query is answered by
-  the structural indices alone, and a client should be able to say so.
+  semantic (vector) search took part *in this query*. Without an embeddings
+  endpoint, with vectors embedded by another model, when the query was routed
+  past the vector index (a short keyword query, ``mode="lexical"``, memory
+  types without a vector index) or when embedding the query failed, the answer
+  came from the structural indices alone, and a client should be able to say
+  so. ``semantic_reason`` says why; ``indices_used`` names the index kinds that
+  returned candidates.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from boltzmann.query import Query, QueryFilters, QueryHints, RetrievalMode
 
 from gaussia_brains_mcp_server.guidance import content_to_text
 from gaussia_brains_mcp_server.indices.engines import _block_text
+from gaussia_brains_mcp_server.indices.planner import plan_report
 
 MAX_LIMIT = 100
 MAX_EXPAND_DEPTH = 3
@@ -30,7 +35,11 @@ class SearchInputError(ValueError):
 
 
 def _semantic_ready(brain: Brain) -> bool:
-    """Whether a vector index over the semantic module can answer a query here."""
+    """Whether a vector index over the semantic module *could* answer here.
+
+    Only a fallback for a brain opened with a planner that does not report
+    what it did; :func:`plan_report` is the answer for our own planner.
+    """
     if not brain.snapshot().has_module(MemoryType.SEMANTIC):
         return False
     for index in brain.indices.get(MemoryType.SEMANTIC, []):
@@ -126,7 +135,15 @@ def search_brain(
             }
         )
 
-    semantic = _semantic_ready(brain)
+    report = plan_report(bundle)
+    if report is not None:
+        semantic = report.vector_used
+        semantic_reason = report.vector_reason
+        indices_used: list[str] | None = list(report.contributed)
+    else:
+        semantic = _semantic_ready(brain)
+        semantic_reason = None if semantic else "unavailable"
+        indices_used = None
     return {
         "results": results,
         "truncated": bool(bundle.truncated),
@@ -140,6 +157,8 @@ def search_brain(
             "searched_memory_types": [mt.value for mt in searched],
             "missing_memory_types": [mt.value for mt in missing],
             "semantic": semantic,
+            "semantic_reason": semantic_reason,
+            "indices_used": indices_used,
             "dropped_unverified": dropped,
         },
     }

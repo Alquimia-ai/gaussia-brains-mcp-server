@@ -15,7 +15,11 @@ and three service concerns put in:
   is served read-only, and every write to it is ``refused_policy``.
 
 The pyboltzmann calls are synchronous and CPU-bound, so they run in a worker
-thread while the brain's write lock is held. Reads never take the lock.
+thread while the brain's write lock is held -- through ``run_locked_thread``, so
+a cancelled request or job never releases the lock while that thread still
+works on the brain. The SDK's distribution coroutines (push, fetch, pull) do
+heavy synchronous work between their awaits, so they run to completion on a
+private event loop in such a thread. Reads never take the lock.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ import shutil
 import tarfile
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +79,8 @@ from gaussia_brains_mcp_server.lifecycle.workstore import (
     BrainHandle,
     BrainMeta,
     WorkingStore,
+    run_coroutine_in_thread,
+    run_locked_thread,
     tag_for_branch,
     validate_default_tag,
 )
@@ -672,14 +678,34 @@ class LifecycleService:
         if brain.current_branch() != branch:
             brain.checkout(branch)
             handle.align_default_branch(brain)
+            # Kept read handles remember the head pointer they were opened on.
+            handle.forget_readers()
 
     @staticmethod
-    def _check_if_match(brain: Brain, if_match: str | None) -> None:
+    def _branch_head(brain: Brain, name: str) -> str | None:
+        """The head of branch *name* as the open brain sees it (``None``: none)."""
+        state = brain.state()
+        if not state:
+            return None
+        if brain.current_branch() == name:
+            return state.get("snapshot")
+        for info in brain.branches():
+            if info.name == name:
+                return str(info.snapshot)
+        return None
+
+    @classmethod
+    def _check_if_match(cls, brain: Brain, if_match: str | None) -> None:
+        """``If-Match`` against the current branch's head."""
+        state = brain.state()
+        cls._check_head(state.get("snapshot") if state else None, if_match)
+
+    @staticmethod
+    def _check_head(head: str | None, if_match: str | None) -> None:
+        """Refuse with ``not_fast_forward`` unless *head* is what *if_match* names."""
         wanted = normalize_if_match(if_match)
         if wanted is None:
             return
-        state = brain.state()
-        head = state.get("snapshot") if state else None
         if wanted == "*":
             if head is None:
                 raise LifecycleError(NOT_FAST_FORWARD, "the branch has no head yet")
@@ -707,9 +733,10 @@ class LifecycleService:
 
             def run() -> Any:
                 brain = handle.writer()
-                self._require_writable(brain)
                 if switch:
                     self._switch_to(handle, brain, branch or DEFAULT_BRANCH)
+                # After the switch: governance is a property of the branch's head.
+                self._require_writable(brain)
                 self._check_if_match(brain, if_match)
                 brain.actor = actor
                 brain.assisted_by = list(assisted_by or [])
@@ -721,12 +748,12 @@ class LifecycleService:
                     handle.align_default_branch(brain)
 
             try:
-                return await asyncio.to_thread(run)
+                return await run_locked_thread(run)
             except LifecycleError:
                 raise
-            except Exception:
-                # The handle may hold state the failed call half-updated; the
-                # next write reopens it from what is on disk.
+            except BaseException:
+                # The handle may hold state the failed (or cancelled) call
+                # half-updated; the next write reopens it from what is on disk.
                 handle.reset_writer()
                 raise
 
@@ -947,7 +974,12 @@ class LifecycleService:
         *,
         actor: Actor,
         start: str | None = None,
+        if_match: str | None = None,
     ) -> dict[str, Any]:
+        """Name a new branch at *start* (a branch, a snapshot, or the current head).
+
+        *if_match* is checked against the head of the branch it starts from.
+        """
         if (
             name != DEFAULT_BRANCH
             and tag_for_branch(handle.meta, name) == handle.meta.default_tag
@@ -964,6 +996,16 @@ class LifecycleService:
                     REFUSED_PROTOCOL,
                     "the brain has no history yet; commit something before branching",
                 )
+            if if_match is not None:
+                if start is None:
+                    source_head = brain.state().get("snapshot")
+                elif start.startswith("sha256:"):
+                    source_head = start
+                else:
+                    source_head = self._branch_head(brain, start)
+                    if source_head is None:
+                        raise LifecycleError(NOT_FOUND, f"no branch named {start!r}")
+                self._check_head(source_head, if_match)
             info = brain.create_branch(name, at=start)
             return {
                 "name": info.name,
@@ -976,8 +1018,15 @@ class LifecycleService:
         )
 
     async def delete_branch(
-        self, handle: BrainHandle, name: str, *, actor: Actor, force: bool = False
+        self,
+        handle: BrainHandle,
+        name: str,
+        *,
+        actor: Actor,
+        force: bool = False,
+        if_match: str | None = None,
     ) -> dict[str, Any]:
+        """Delete branch *name*; *if_match* is checked against its head."""
         if name == DEFAULT_BRANCH:
             raise LifecycleError(USAGE, "main cannot be deleted")
 
@@ -985,10 +1034,11 @@ class LifecycleService:
             heads = {info.name: info.snapshot for info in brain.branches()}
             if name not in heads:
                 raise LifecycleError(NOT_FOUND, f"no branch named {name!r}")
+            self._check_head(self._branch_head(brain, name), if_match)
             if brain.current_branch() == name:
                 # The working copy's current branch is the service's business,
                 # not the caller's: step off it rather than refuse.
-                brain.checkout(DEFAULT_BRANCH)
+                self._switch_to(handle, brain, DEFAULT_BRANCH)
             brain.delete_branch(name, force=force)
             return {
                 "name": name,
@@ -1006,31 +1056,52 @@ class LifecycleService:
         return BrainCache._loads_vector_indices(manifest, None)
 
     def push(
-        self, handle: BrainHandle, branch: str, *, actor: Actor, force: bool = False
+        self,
+        handle: BrainHandle,
+        branch: str,
+        *,
+        actor: Actor,
+        force: bool = False,
+        if_match: str | None = None,
     ) -> Job:
+        """Publish *branch* to its tag; *if_match* is checked against its head."""
         self._require_source(handle.reference)
 
         async def body(ctx: JobContext) -> dict[str, Any]:
             tag = tag_for_branch(handle.meta, branch)
             ctx.stage("waiting for the brain")
             async with handle.writing(f"pushing {branch}"):
-                brain = handle.writer()
-                await asyncio.to_thread(self._switch_to, handle, brain, branch)
-                if brain.state() == {}:
-                    raise LifecycleError(
-                        REFUSED_PROTOCOL, "the brain has no history to push"
-                    )
+
+                def prepare() -> Brain:
+                    brain = handle.writer()
+                    self._switch_to(handle, brain, branch)
+                    if brain.state() == {}:
+                        raise LifecycleError(
+                            REFUSED_PROTOCOL, "the brain has no history to push"
+                        )
+                    self._check_if_match(brain, if_match)
+                    return brain
+
                 ctx.stage(f"pushing to {handle.reference}:{tag}")
                 client = self._client_factory()
-                try:
-                    digest = await brain.push(
-                        client, handle.reference, tag, force=force
+
+                def publish() -> tuple[OciDigest, OciDigest]:
+                    brain = prepare()
+                    # The registry client declares the commit point itself,
+                    # right before it writes the manifest.
+                    digest = run_coroutine_in_thread(
+                        lambda: brain.push(client, handle.reference, tag, force=force)
                     )
-                except Exception:
+                    handle.align_default_branch(brain)
+                    return digest, brain.snapshot().digest
+
+                try:
+                    digest, snapshot = await run_locked_thread(publish)
+                except LifecycleError:
+                    raise
+                except BaseException:
                     handle.reset_writer()
                     raise
-                handle.align_default_branch(brain)
-                snapshot = brain.snapshot().digest
             result: dict[str, Any] = {
                 "reference": handle.reference,
                 "branch": branch,
@@ -1078,16 +1149,30 @@ class LifecycleService:
         actor: Actor,
         tag: str | None = None,
         branch: str | None = None,
+        if_match: str | None = None,
     ) -> Job:
-        """Install a published tag: main's by default, or the one a branch publishes to."""
+        """Install a published tag: main's by default, or the one a branch publishes to.
+
+        *if_match* is checked against the head of the branch the tag installs
+        into (the named branch, else the branch publishing to *tag*, else the
+        current one).
+        """
         self._require_source(handle.reference)
         if tag is None:
             tag = tag_for_branch(handle.meta, branch or DEFAULT_BRANCH)
+        target = branch or branch_for_tag(tag, handle.meta.default_tag)
 
         async def body(ctx: JobContext) -> dict[str, Any]:
             ctx.stage("waiting for the brain")
             async with handle.writing(f"pulling {tag}"):
-                result = await self._pull_into(handle, ctx, handle.reference, tag)
+                result = await self._pull_into(
+                    handle,
+                    ctx,
+                    handle.reference,
+                    tag,
+                    if_match=if_match,
+                    target=target,
+                )
             if self.cache is not None:
                 self.cache.invalidate(handle.reference, tag)
             return result
@@ -1101,41 +1186,76 @@ class LifecycleService:
         )
 
     async def _pull_into(
-        self, handle: BrainHandle, ctx: JobContext, reference: str, tag: str
+        self,
+        handle: BrainHandle,
+        ctx: JobContext,
+        reference: str,
+        tag: str,
+        *,
+        if_match: str | None = None,
+        target: str | None = None,
     ) -> dict[str, Any]:
-        """Fetch (cancellable), then pull what was fetched (not cancellable)."""
-        brain = handle.writer()
-        if brain.state() and brain.reconcile_status() is not None:
-            raise LifecycleError(
-                NEEDS_HUMAN,
-                "a convergence is open; pulling would move the head out from under it",
-            )
-        client = self._client_factory(pinned=True)
-        ctx.stage(f"fetching {reference}:{tag}")
-        manifest = await client.resolve(reference, tag)
-        fetched = await brain.fetch(client, reference, tag)
-        ctx.commit_point("installing")
+        """Fetch (cancellable), then pull what was fetched (not cancellable).
+
+        Called holding the brain's write lock. Every step that touches the
+        brain runs in a worker thread that is waited for even on cancel.
+        """
+
+        def prepare() -> Brain:
+            brain = handle.writer()
+            if brain.state() and brain.reconcile_status() is not None:
+                raise LifecycleError(
+                    NEEDS_HUMAN,
+                    "a convergence is open; pulling would move the head out from under it",
+                )
+            if if_match is not None:
+                name = target or brain.current_branch()
+                self._check_head(self._branch_head(brain, name), if_match)
+            return brain
+
         try:
-            snapshot = await brain.pull(
-                client,
-                reference,
-                tag,
-                ignore_vector_indices=not self._vector_layers_loadable(manifest),
-                verification=default_verification(self.settings),
-            )
-        except Exception:
+            brain = await run_locked_thread(prepare)
+            client = self._client_factory(pinned=True)
+            ctx.stage(f"fetching {reference}:{tag}")
+
+            async def fetch() -> tuple[Any, Any]:
+                manifest = await client.resolve(reference, tag)
+                fetched = await brain.fetch(client, reference, tag)
+                return manifest, fetched
+
+            manifest, fetched = await run_locked_thread(run_coroutine_in_thread, fetch)
+            ctx.commit_point("installing")
+
+            def install() -> dict[str, Any]:
+                snapshot = run_coroutine_in_thread(
+                    lambda: brain.pull(
+                        client,
+                        reference,
+                        tag,
+                        ignore_vector_indices=not self._vector_layers_loadable(
+                            manifest
+                        ),
+                        verification=default_verification(self.settings),
+                    )
+                )
+                handle.align_default_branch(brain)
+                return {
+                    "reference": reference,
+                    "tag": tag,
+                    "snapshot": str(snapshot.digest),
+                    "fetched": str(fetched.digest),
+                    "branch": brain.current_branch(),
+                    "governed": brain.trust_root is not None,
+                }
+
+            return await run_locked_thread(install)
+        except LifecycleError:
+            raise
+        except BaseException:
             handle.reset_writer()
             raise
-        handle.align_default_branch(brain)
-        handle.forget_readers()
-        return {
-            "reference": reference,
-            "tag": tag,
-            "snapshot": str(snapshot.digest),
-            "fetched": str(fetched.digest),
-            "branch": brain.current_branch(),
-            "governed": brain.trust_root is not None,
-        }
+        finally:
+            handle.forget_readers()
 
     # -- converge ---------------------------------------------------------------- #
 
@@ -1149,6 +1269,7 @@ class LifecycleService:
         strategy: str | None = None,
         reason: str | None = None,
         fast_forward: str = "auto",
+        if_match: str | None = None,
     ) -> Job:
         """Bring *source* into branch *into*.
 
@@ -1160,6 +1281,8 @@ class LifecycleService:
         because it decides who stays on record as author. A reconciliation
         that does not apply cleanly stops with the convergence open
         (``needs_human``); resolve it through ``/convergence``.
+
+        *if_match* is checked against the head of *into*.
         """
         chosen = None
         if strategy is not None:
@@ -1176,88 +1299,80 @@ class LifecycleService:
         async def body(ctx: JobContext) -> dict[str, Any]:
             ctx.stage("waiting for the brain")
             async with handle.writing(f"converging {source} into {into}"):
-                brain = handle.writer()
-                self._require_writable(brain)
-                await asyncio.to_thread(self._switch_to, handle, brain, into)
-                local = {info.name for info in brain.branches()}
                 temp: str | None = None
-                if source in local:
-                    branch_name = source
-                else:
-                    reference, tag = self._remote(handle, source)
-                    client = self._client_factory(pinned=True)
-                    ctx.stage(f"fetching {reference}:{tag}")
-                    fetched = await brain.fetch(client, reference, tag)
-                    temp = f"converge/{ctx.job.id[-12:]}"
-                    branch_name = temp
-                    await asyncio.to_thread(brain.create_branch, temp, fetched.digest)
-                ctx.commit_point("joining")
+                brain: Brain | None = None
 
-                def join() -> dict[str, Any]:
-                    brain.actor = actor
-                    try:
-                        joined = brain.join(
-                            branch_name,
-                            chosen,
-                            reason or f"converge {source} into {into}",
-                            fast_forward=fast_forward,  # type: ignore[arg-type]
-                        )
-                    except ReconciliationHaltedError as exc:
-                        status = brain.reconcile_status()
-                        raise LifecycleError(
-                            NEEDS_HUMAN,
-                            f"converging {source} into {into} stopped with questions open; "
-                            f"resolve them via /convergence, then continue or abort",
-                            detail={"convergence": _dump(status)},
-                        ) from exc
-                    except BranchError as exc:
-                        if chosen is None and "diverged" in str(exc):
-                            raise LifecycleError(
-                                USAGE,
-                                f"{into!r} and {source!r} diverged; converging them needs "
-                                f"a strategy (merge keeps their snapshots and signatures, "
-                                f"rebase and squash re-sign the work as yours)",
-                                detail={"needs": "strategy"},
-                            ) from exc
-                        raise
-                    finally:
-                        brain.actor = reader_actor()
-                        if temp is not None:
-                            try:
-                                brain.delete_branch(temp, force=True)
-                            except Exception as cleanup:  # noqa: BLE001
-                                logger.warning("could not drop {}: {}", temp, cleanup)
-                        handle.align_default_branch(brain)
-                    out: dict[str, Any] = {
-                        "source": source,
-                        "into": into,
-                        "outcome": joined.outcome,
-                        "snapshot": str(joined.snapshot),
-                        "strategy": chosen.value if chosen else None,
-                    }
-                    if joined.reconciliation is not None:
-                        rec = joined.reconciliation
-                        out["reconciliation"] = {
-                            "parents": [str(p) for p in rec.parents],
-                            "snapshots": [str(s) for s in rec.snapshots],
-                            "admitted": {
-                                mt.value: [str(b) for b in ids]
-                                for mt, ids in rec.admitted.items()
-                            },
-                            "excluded": {
-                                mt.value: [str(b) for b in ids]
-                                for mt, ids in rec.excluded.items()
-                            },
-                        }
-                    return out
+                def prepare() -> tuple[Brain, set[str]]:
+                    opened = handle.writer()
+                    self._switch_to(handle, opened, into)
+                    self._require_writable(opened)
+                    self._check_if_match(opened, if_match)
+                    return opened, {info.name for info in opened.branches()}
+
+                def finish() -> None:
+                    # A fresh writer if a failure above dropped it: the
+                    # temporary branch is on disk either way.
+                    opened = handle.writer()
+                    if temp is not None:
+                        try:
+                            opened.delete_branch(temp, force=True)
+                        except Exception as cleanup:  # noqa: BLE001
+                            logger.warning("could not drop {}: {}", temp, cleanup)
+                    handle.align_default_branch(opened)
 
                 try:
-                    return await asyncio.to_thread(join)
+                    opened_brain, local = await run_locked_thread(prepare)
+                    # Kept in the outer name so the finally can drop the temp branch.
+                    brain = opened_brain
+                    if source in local:
+                        branch_name = source
+                    else:
+                        reference, tag = self._remote(handle, source)
+                        client = self._client_factory(pinned=True)
+                        ctx.stage(f"fetching {reference}:{tag}")
+                        fetching = opened_brain
+                        fetched = await run_locked_thread(
+                            run_coroutine_in_thread,
+                            lambda: fetching.fetch(client, reference, tag),
+                        )
+                        branch_name = f"converge/{ctx.job.id[-12:]}"
+                        # Recorded before the thread starts: a cancel while it
+                        # runs still drops the branch below.
+                        temp = branch_name
+                        await run_locked_thread(
+                            opened_brain.create_branch, branch_name, fetched.digest
+                        )
+                    ctx.commit_point("joining")
+                    joining = opened_brain
+
+                    def join() -> dict[str, Any]:
+                        return self._join(
+                            joining,
+                            branch_name,
+                            chosen,
+                            actor=actor,
+                            source=source,
+                            into=into,
+                            reason=reason,
+                            fast_forward=fast_forward,
+                        )
+
+                    return await run_locked_thread(join)
                 except LifecycleError:
                     raise
-                except Exception:
+                except BaseException:
                     handle.reset_writer()
                     raise
+                finally:
+                    try:
+                        if brain is not None:
+                            await run_locked_thread(finish)
+                    except Exception:  # noqa: BLE001 - the join's outcome stands
+                        handle.reset_writer()
+                        logger.exception("cleanup after converging {} failed", source)
+                    finally:
+                        # The join moved pointers, or left a convergence open.
+                        handle.forget_readers()
 
         return self.jobs.submit(
             "converge",
@@ -1271,6 +1386,68 @@ class LifecycleService:
                 "fast_forward": fast_forward,
             },
         )
+
+    @staticmethod
+    def _join(
+        brain: Brain,
+        branch_name: str,
+        chosen: ReconcileStrategy | None,
+        *,
+        actor: Actor,
+        source: str,
+        into: str,
+        reason: str | None,
+        fast_forward: str,
+    ) -> dict[str, Any]:
+        """Join *branch_name* into the current branch. Blocking; under the lock."""
+        brain.actor = actor
+        try:
+            joined = brain.join(
+                branch_name,
+                chosen,
+                reason or f"converge {source} into {into}",
+                fast_forward=fast_forward,  # type: ignore[arg-type]
+            )
+        except ReconciliationHaltedError as exc:
+            status = brain.reconcile_status()
+            raise LifecycleError(
+                NEEDS_HUMAN,
+                f"converging {source} into {into} stopped with questions open; "
+                f"resolve them via /convergence, then continue or abort",
+                detail={"convergence": _dump(status)},
+            ) from exc
+        except BranchError as exc:
+            if chosen is None and "diverged" in str(exc):
+                raise LifecycleError(
+                    USAGE,
+                    f"{into!r} and {source!r} diverged; converging them needs "
+                    f"a strategy (merge keeps their snapshots and signatures, "
+                    f"rebase and squash re-sign the work as yours)",
+                    detail={"needs": "strategy"},
+                ) from exc
+            raise
+        finally:
+            brain.actor = reader_actor()
+        out: dict[str, Any] = {
+            "source": source,
+            "into": into,
+            "outcome": joined.outcome,
+            "snapshot": str(joined.snapshot),
+            "strategy": chosen.value if chosen else None,
+        }
+        if joined.reconciliation is not None:
+            rec = joined.reconciliation
+            out["reconciliation"] = {
+                "parents": [str(p) for p in rec.parents],
+                "snapshots": [str(s) for s in rec.snapshots],
+                "admitted": {
+                    mt.value: [str(b) for b in ids] for mt, ids in rec.admitted.items()
+                },
+                "excluded": {
+                    mt.value: [str(b) for b in ids] for mt, ids in rec.excluded.items()
+                },
+            }
+        return out
 
     def _remote(self, handle: BrainHandle, source: str) -> tuple[str, str]:
         """``(reference, tag)`` for a converge source that is not a local branch."""
@@ -1286,11 +1463,16 @@ class LifecycleService:
     # -- convergence in progress -------------------------------------------------- #
 
     def convergence(self, handle: BrainHandle) -> dict[str, Any]:
+        """The open convergence, if any.
+
+        Read through a brain opened now, not a kept read handle: the reconcile
+        state names the head it was started on, and a kept handle remembers
+        the head pointer as it was when that handle was opened.
+        """
         heads = handle.heads()
         if heads.head is None:
             return {"open": False}
-        with handle.reading(heads.head) as reader:
-            status = reader.brain.reconcile_status()
+        status = handle.fresh_reader().reconcile_status()
         if status is None:
             return {"open": False}
         return {
@@ -1309,15 +1491,21 @@ class LifecycleService:
         fn: Callable[[Brain], Any],
         *,
         actor: Actor,
+        if_match: str | None = None,
     ) -> Any:
+        """A write to the open convergence; *if_match* is the current branch head."""
+
         def op(brain: Brain) -> Any:
             if brain.state() == {} or brain.reconcile_status() is None:
                 raise LifecycleError(NOT_FOUND, "no convergence is open on this brain")
             return fn(brain)
 
-        result = await self._write(handle, what, op, actor=actor, switch=False)
-        handle.forget_readers()
-        return result
+        try:
+            return await self._write(
+                handle, what, op, actor=actor, switch=False, if_match=if_match
+            )
+        finally:
+            handle.forget_readers()
 
     async def resolve(
         self,
@@ -1328,6 +1516,7 @@ class LifecycleService:
         kind: str,
         prefer: str | None = None,
         reason: str | None = None,
+        if_match: str | None = None,
     ) -> dict[str, Any]:
         bid = _parse_block_id(block)
         try:
@@ -1349,11 +1538,16 @@ class LifecycleService:
             }
 
         return await self._convergence_write(
-            handle, f"resolving {bid.short}", fn, actor=actor
+            handle, f"resolving {bid.short}", fn, actor=actor, if_match=if_match
         )
 
     async def accept_removals(
-        self, handle: BrainHandle, *, actor: Actor, reason: str | None = None
+        self,
+        handle: BrainHandle,
+        *,
+        actor: Actor,
+        reason: str | None = None,
+        if_match: str | None = None,
     ) -> dict[str, Any]:
         def fn(brain: Brain) -> dict[str, Any]:
             status = brain.reconcile_accept_removals(reason=reason, actor=actor)
@@ -1364,11 +1558,11 @@ class LifecycleService:
             }
 
         return await self._convergence_write(
-            handle, "accepting removals", fn, actor=actor
+            handle, "accepting removals", fn, actor=actor, if_match=if_match
         )
 
     async def continue_convergence(
-        self, handle: BrainHandle, *, actor: Actor
+        self, handle: BrainHandle, *, actor: Actor, if_match: str | None = None
     ) -> dict[str, Any]:
         def fn(brain: Brain) -> dict[str, Any]:
             result = brain.reconcile_continue()
@@ -1388,11 +1582,11 @@ class LifecycleService:
             }
 
         return await self._convergence_write(
-            handle, "continuing convergence", fn, actor=actor
+            handle, "continuing convergence", fn, actor=actor, if_match=if_match
         )
 
     async def abort_convergence(
-        self, handle: BrainHandle, *, actor: Actor
+        self, handle: BrainHandle, *, actor: Actor, if_match: str | None = None
     ) -> dict[str, Any]:
         def fn(brain: Brain) -> dict[str, Any]:
             status = brain.reconcile_status()
@@ -1404,7 +1598,7 @@ class LifecycleService:
             }
 
         return await self._convergence_write(
-            handle, "aborting convergence", fn, actor=actor
+            handle, "aborting convergence", fn, actor=actor, if_match=if_match
         )
 
     # -- import --------------------------------------------------------------- #
@@ -1458,17 +1652,19 @@ class LifecycleService:
             actor=actor.id,
             body=body,
             params={"source": f"{src_ref}:{src_tag}"},
-            cleanup=self._discard_if_empty(reference, handle),
+            cleanup=self._discard_if_empty(handle),
         )
 
-    def _discard_if_empty(
-        self, reference: str, handle: BrainHandle
-    ) -> Callable[[], None]:
-        """A failed or cancelled import leaves nothing behind."""
+    def _discard_if_empty(self, handle: BrainHandle) -> Callable[[], Awaitable[None]]:
+        """A failed or cancelled import leaves nothing behind.
 
-        def cleanup() -> None:
-            if handle.heads().head is None:
-                self.store.discard(reference)
+        Unless another client wrote to the brain meanwhile: it is visible from
+        the moment it is created, so the check and the removal happen under
+        its write lock (the job body has released it by the time this runs).
+        """
+
+        async def cleanup() -> None:
+            await self.store.discard_if_empty(handle)
 
         return cleanup
 
@@ -1510,24 +1706,25 @@ class LifecycleService:
                     tempfile.mkdtemp(prefix=".import-", dir=handle.directory)
                 )
                 try:
-                    root = await asyncio.to_thread(_unpack_layout, archive, scratch)
+                    root = await run_locked_thread(_unpack_layout, archive, scratch)
                     ctx.stage("verifying")
-                    summary = await asyncio.to_thread(_verify_layout, root)
+                    summary = await run_locked_thread(_verify_layout, root)
                     ctx.commit_point("installing")
-                    await asyncio.to_thread(_replace_layout, handle.layout, root)
+                    await run_locked_thread(_replace_layout, handle.layout, root)
                 finally:
-                    shutil.rmtree(scratch, ignore_errors=True)
-                    archive.unlink(missing_ok=True)
-                handle.reset_writer()
-                handle.forget_readers()
-                handle.align_default_branch(handle.writer())
+                    handle.reset_writer()
+                    handle.forget_readers()
+                    await run_locked_thread(_drop_upload, scratch, archive)
+                await run_locked_thread(
+                    lambda: handle.align_default_branch(handle.writer())
+                )
             return {"reference": reference, **summary}
 
-        discard = self._discard_if_empty(reference, handle)
+        discard = self._discard_if_empty(handle)
 
-        def cleanup() -> None:
+        async def cleanup() -> None:
             archive.unlink(missing_ok=True)
-            discard()
+            await discard()
 
         return self.jobs.submit(
             "import",
@@ -1603,9 +1800,34 @@ def _verify_layout(root: Path) -> dict[str, Any]:
     }
 
 
+def _drop_upload(scratch: Path, archive: Path) -> None:
+    shutil.rmtree(scratch, ignore_errors=True)
+    archive.unlink(missing_ok=True)
+
+
 def _replace_layout(target: Path, root: Path) -> None:
+    """Swap *root* in as *target*, never leaving *target* missing.
+
+    The new layout is first moved beside *target* (same directory, so the
+    same filesystem, a copy if it has to be), then two renames swap them. A
+    failure before the swap leaves the old layout untouched; a failure in it
+    puts the old layout back.
+    """
+    staged = Path(tempfile.mkdtemp(prefix=f".{target.name}.new-", dir=target.parent))
+    incoming = staged / target.name
     backup = target.with_name(target.name + ".old")
-    if target.exists():
-        target.rename(backup)
-    shutil.move(str(root), str(target))
-    shutil.rmtree(backup, ignore_errors=True)
+    try:
+        shutil.move(str(root), str(incoming))
+        shutil.rmtree(backup, ignore_errors=True)
+        had_target = target.exists()
+        if had_target:
+            target.rename(backup)
+        try:
+            incoming.rename(target)
+        except BaseException:
+            if had_target and not target.exists():
+                backup.rename(target)
+            raise
+        shutil.rmtree(backup, ignore_errors=True)
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)

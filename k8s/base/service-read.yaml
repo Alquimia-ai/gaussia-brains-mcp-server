@@ -1,0 +1,14 @@
+# The read service: MCP (/mcp/<brain-ref>), discovery and search of published brains. Lifecycle
+# writes (POST/DELETE under /v1/brains) and /v1/jobs must go to the writer service
+# (gaussia-brains-mcp-server); see k8s/README.md.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gaussia-brains-mcp-server-read
+  labels:
+    alquimia.ai/component: brains-mcp
+spec:
+  selector:
+    app.kubernetes.io/name: gaussia-brains-mcp-server-read
+  ports:
+    - { name: http, port: 8000, targetPort: http }

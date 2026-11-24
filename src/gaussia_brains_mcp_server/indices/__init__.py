@@ -55,6 +55,12 @@ class EngineIndexProvider:
     configured) plus the graph index, so ``expand_depth`` follows relations.
     ``VectorIndex.build`` refuses to build without embeddings, so it is only
     registered where it can be built.
+
+    ``BitmapIndex`` is ported but deliberately not registered, as in core
+    (``alquimia.boltzmann.store.default_indices``): the planner never routes
+    a query to ``IndexKind.BITMAP`` (``QueryFilters`` carries no categorical
+    predicate to hand it), so building it would cost a pass over every block
+    for an index nothing reads.
     """
 
     def indices(self) -> dict[MemoryType, list[Index]] | None:

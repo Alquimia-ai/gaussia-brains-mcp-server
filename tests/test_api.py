@@ -30,7 +30,8 @@ def _configure_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_healthz() -> None:
+def test_healthz(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_auth(monkeypatch)
     with TestClient(create_app()) as client:
         response = client.get("/healthz")
     assert response.status_code == 200
@@ -73,3 +74,16 @@ def test_brain_tags_returns_tag_list(
     assert response.status_code == 200
     body = response.json()
     assert body["tags"] == ["latest", "v1.0.0"]
+
+
+def test_refuses_to_start_with_auth_on_and_no_issuers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GBMS_AUTH_ENABLED", "true")
+    monkeypatch.setenv("GBMS_AUTH_ISSUERS", "[]")
+    monkeypatch.delenv("GBMS_ALLOW_INSECURE_DEV", raising=False)
+    get_settings.cache_clear()
+    with pytest.raises(ValueError, match="GBMS_AUTH_ISSUERS"):
+        with TestClient(create_app()):
+            pass
+    get_settings.cache_clear()

@@ -10,6 +10,11 @@ tag is not); for a pull, import or converge, the moment before the brain's head
 pointer moves. After that a cancel is refused with ``usage`` and the job runs
 to the end.
 
+Cancelling is cooperative with work running in worker threads: the job's
+cancel flag and its commit point are guarded by one thread lock, so a cancel is
+either accepted before the commit point (and the worker stops at its next
+checkpoint) or refused after it, whichever thread gets there first.
+
 Jobs live in memory. A restart loses the record of finished jobs and kills
 running ones, which is safe because no job writes anything it has not finished:
 blobs are content-addressed and pointers move last.
@@ -19,6 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import inspect
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -69,6 +76,9 @@ class Job:
     result: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     task: asyncio.Task[Any] | None = field(default=None, repr=False)
+    #: Guards ``cancel_requested`` against ``cancellable``: a commit point
+    #: may be declared from a worker thread while a cancel arrives on the loop.
+    guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def view(self) -> dict[str, Any]:
         return {
@@ -111,11 +121,13 @@ class JobContext:
 
         Synchronous on purpose: between this check and the next ``await`` no
         cancel can be accepted, so a cancel either lands before the commit
-        point or is refused.
+        point or is refused. The job's guard makes the same hold when the
+        commit point is declared from a worker thread.
         """
-        self.checkpoint()
-        self.job.cancellable = False
-        self.job.stage = what
+        with self.job.guard:
+            self.checkpoint()
+            self.job.cancellable = False
+            self.job.stage = what
 
 
 _current: contextvars.ContextVar[JobContext | None] = contextvars.ContextVar(
@@ -129,6 +141,8 @@ def current_job() -> JobContext | None:
 
 
 JobBody = Callable[[JobContext], Awaitable[dict[str, Any]]]
+#: Runs when a job ends without succeeding; may be a plain function or a coroutine.
+JobCleanup = Callable[[], Awaitable[None] | None]
 
 
 class JobRunner:
@@ -146,13 +160,14 @@ class JobRunner:
         actor: str,
         body: JobBody,
         params: dict[str, Any] | None = None,
-        cleanup: Callable[[], None] | None = None,
+        cleanup: JobCleanup | None = None,
     ) -> Job:
         """Start *body* as a job.
 
         *cleanup* runs whenever the job ends without succeeding -- failed,
         cancelled, even cancelled before it started -- e.g. to remove a brain
-        an import created and never filled.
+        an import created and never filled. It may be async; it is awaited
+        after the body has returned, so any lock the body held is released.
         """
         job = Job(
             id=f"job_{uuid.uuid4().hex}",
@@ -168,9 +183,7 @@ class JobRunner:
         )
         return job
 
-    async def _run(
-        self, job: Job, body: JobBody, cleanup: Callable[[], None] | None
-    ) -> None:
+    async def _run(self, job: Job, body: JobBody, cleanup: JobCleanup | None) -> None:
         ctx = JobContext(job)
         token = _current.set(ctx)
         job.state = JobState.RUNNING
@@ -203,7 +216,9 @@ class JobRunner:
             _current.reset(token)
             if cleanup is not None and job.state is not JobState.SUCCEEDED:
                 try:
-                    cleanup()
+                    outcome = cleanup()
+                    if inspect.isawaitable(outcome):
+                        await outcome
                 except Exception:  # noqa: BLE001 - the job's own outcome stands
                     logger.exception("cleanup after job {} failed", job.id)
 
@@ -230,7 +245,15 @@ class JobRunner:
                 f"will run to the end",
                 detail=job.view(),
             )
-        job.cancel_requested = True
+        with job.guard:
+            if not job.cancellable:
+                raise LifecycleError(
+                    USAGE,
+                    f"job {job_id} is past its point of no return ({job.stage}) and "
+                    f"will run to the end",
+                    detail=job.view(),
+                )
+            job.cancel_requested = True
         # A task that has not started yet is not cancelled: cancelling it would
         # throw into the coroutine before it records anything, leaving the job
         # "queued" forever. It sees the flag at its first checkpoint instead.

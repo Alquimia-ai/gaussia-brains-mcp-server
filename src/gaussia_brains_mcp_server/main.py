@@ -17,7 +17,11 @@ from gaussia_brains_mcp_server import __version__
 from gaussia_brains_mcp_server.api.brains import router as brains_router
 from gaussia_brains_mcp_server.api.lifecycle import jobs_router
 from gaussia_brains_mcp_server.api.lifecycle import router as lifecycle_router
-from gaussia_brains_mcp_server.auth.http import metadata_router, resource_metadata_url
+from gaussia_brains_mcp_server.auth.http import (
+    AuthError,
+    metadata_router,
+    resource_metadata_url,
+)
 from gaussia_brains_mcp_server.auth.scopes import READ
 from gaussia_brains_mcp_server.auth.verifier import TokenVerifier
 from gaussia_brains_mcp_server.cache import BrainCache
@@ -130,6 +134,8 @@ async def lifespan(app: FastAPI) -> Any:
     """Start shared resources and keep a task group open for MCP managers."""
     settings = get_settings()
     app.state.settings = settings
+    # Refuse to start rather than come up Ready and answer 401 to everything.
+    settings.raise_for_startup()
     app.state.token_verifier = TokenVerifier(settings)
     install_engines(settings)
     app.state.brain_cache = BrainCache(settings)
@@ -205,10 +211,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def _http_exception_handler(
         _request: Any, exc: HTTPException
     ) -> JSONResponse:
+        headers = dict(exc.headers) if exc.headers else None
+        if isinstance(exc, AuthError):
+            # The REST error contract; MCP's own 401s come from its transport
+            # (mounted under the MCP path) and never reach this handler.
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"code": exc.code, "message": exc.message, "detail": {}},
+                headers=headers,
+            )
         return JSONResponse(
             status_code=exc.status_code,
             content={"detail": exc.detail},
-            headers=dict(exc.headers) if exc.headers else None,
+            headers=headers,
         )
 
     return app

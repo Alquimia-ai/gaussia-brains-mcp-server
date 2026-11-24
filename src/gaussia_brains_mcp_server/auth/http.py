@@ -71,6 +71,38 @@ def www_authenticate(
     return "Bearer " + ", ".join(params)
 
 
+class AuthError(HTTPException):
+    """A 401/403 from the dependencies below, with its stable error ``code``.
+
+    The application renders it as ``{"code", "message", "detail"}`` (see
+    :mod:`gaussia_brains_mcp_server.lifecycle.errors`): ``unauthenticated``
+    for 401 and ``refused_policy`` for 403. Elsewhere it is a plain
+    :class:`HTTPException`, so headers and status are unchanged.
+    """
+
+    def __init__(
+        self, status_code: int, message: str, *, headers: dict[str, str]
+    ) -> None:
+        super().__init__(status_code=status_code, detail=message, headers=headers)
+        self.code = "unauthenticated" if status_code == 401 else "refused_policy"
+        self.message = message
+
+
+def insufficient_scope(wanted: frozenset[str] | set[str], message: str) -> AuthError:
+    """The 403 for a caller that lacks *wanted* (RFC 6750 §3.1)."""
+    return AuthError(
+        HTTP_403_FORBIDDEN,
+        message,
+        headers={
+            "WWW-Authenticate": www_authenticate(
+                get_settings(),
+                error="insufficient_scope",
+                scope=" ".join(sorted(wanted)),
+            )
+        },
+    )
+
+
 def _dev_principal() -> Principal:
     return Principal(
         subject="dev-anonymous",
@@ -99,9 +131,9 @@ async def require_principal(
 
     if credentials is None or not credentials.credentials:
         # RFC 6750 §3.1: no error code when no credentials were sent.
-        raise HTTPException(
-            status_code=HTTP_401_UNAUTHORIZED,
-            detail="Bearer token required",
+        raise AuthError(
+            HTTP_401_UNAUTHORIZED,
+            "Bearer token required",
             headers={"WWW-Authenticate": www_authenticate(settings)},
         )
     try:
@@ -113,9 +145,9 @@ async def require_principal(
             exc,
             request.headers.get("x-request-id", ""),
         )
-        raise HTTPException(
-            status_code=HTTP_401_UNAUTHORIZED,
-            detail="Invalid bearer token",
+        raise AuthError(
+            HTTP_401_UNAUTHORIZED,
+            "Invalid bearer token",
             headers={
                 "WWW-Authenticate": www_authenticate(
                     settings, error="invalid_token", description=str(exc)
@@ -141,17 +173,7 @@ def require_scopes(*required: str):
                 principal.issuer,
                 sorted(missing),
             )
-            raise HTTPException(
-                status_code=HTTP_403_FORBIDDEN,
-                detail=f"Missing scopes: {sorted(missing)}",
-                headers={
-                    "WWW-Authenticate": www_authenticate(
-                        get_settings(),
-                        error="insufficient_scope",
-                        scope=" ".join(sorted(wanted)),
-                    )
-                },
-            )
+            raise insufficient_scope(wanted, f"Missing scopes: {sorted(missing)}")
         return principal
 
     return _check
@@ -172,16 +194,8 @@ def require_any_scope(*accepted: str):
             principal.issuer,
             sorted(wanted),
         )
-        raise HTTPException(
-            status_code=HTTP_403_FORBIDDEN,
-            detail=f"Requires one of the scopes: {sorted(wanted)}",
-            headers={
-                "WWW-Authenticate": www_authenticate(
-                    get_settings(),
-                    error="insufficient_scope",
-                    scope=" ".join(sorted(wanted)),
-                )
-            },
+        raise insufficient_scope(
+            wanted, f"Requires one of the scopes: {sorted(wanted)}"
         )
 
     return _check

@@ -362,7 +362,7 @@ Renaming the annotation keys to a vendor-neutral prefix is §14 Q3.
 
 ## 9. Search quality
 
-pyboltzmann ships no indices. **Core's index engines are ported** (`indices/`: hash map, B+ tree, BM25 inverted with accent folding, vector, graph, bitmap, and the hybrid RRF planner) behind `IndexProvider`, and every brain -- read cache and working store alike -- is opened with them. MCP `brain_search` and REST `POST .../search` run the same function (`search.py`). Query embeddings come from an OpenAI-compatible `/v1/embeddings` endpoint:
+pyboltzmann ships no indices. **Core's index engines are ported** (`indices/`: hash map, B+ tree, BM25 inverted with accent folding, vector, graph, and the hybrid RRF planner; bitmap is ported but, as in core, not registered) behind `IndexProvider`, and every brain -- read cache and working store alike -- is opened with them. MCP `brain_search` and REST `POST .../search` run the same function (`search.py`). Query embeddings come from an OpenAI-compatible `/v1/embeddings` endpoint:
 - settings: `GBMS_EMBEDDINGS_URL`, `GBMS_EMBEDDINGS_MODEL`, `GBMS_EMBEDDINGS_API_KEY`, and `GBMS_EMBEDDINGS_MODEL_TAG` (the `provider/model` tag travelling vector layers are compared against; default `openai/<model>`);
 - served by vLLM, TEI, Ollama, LiteLLM or OpenAI;
 - without one, search runs on the structural indices and reports `narrowing.semantic=false`.
@@ -456,15 +456,25 @@ Scoring, tokenization and tie-breaking are unchanged from core, so the same brai
 - [x] Phase 5, import from the registry or an uploaded OCI layout; k8s PVC, `Recreate` writer Deployment.
 - [x] End-to-end against a local OCI registry through `oras`: create → evidence → commit → push (+index entry) → import → pull → push → converge (fast-forward) → search from a read-only replica.
 
+### Done (hardening after issue #2)
+
+- [x] Search reports what happened: `truncated` is set when candidates were cut at `limit` (indices probed at `limit+1`); `verified_against` carries the searched module roots; `narrowing.semantic` is true only when a vector index actually scored the query, with `narrowing.semantic_reason` and `narrowing.indices_used`.
+- [x] Range routing only for queries that parse as a range (`a..b`, `>x`), with bounds handed to the B+ tree, and a fallback to the inverted index when the structural indices find nothing (a deliberate divergence from core).
+- [x] Top-k parity with core on a fixture brain (`tests/test_parity_core.py`, structural indices and RRF; runs against `../alquimia-core` when present, skipped otherwise). Vector parity is not covered: core embeds only through its YAML connector.
+- [x] Embeddings client: bounded retries with exponential backoff and jitter on transport errors, 429 and 5xx (`Retry-After` honoured; `GBMS_EMBEDDINGS_MAX_RETRIES`), cache keyed on every client setting, endpoint URL redacted in logs and errors.
+- [x] Blob I/O in `push` off the event loop; `BitmapIndex` documented as unregistered (as in core).
+- [x] Auth enabled with no issuers is a fatal startup problem unless `GBMS_ALLOW_INSECURE_DEV=true` (`Settings.raise_for_startup`).
+- [x] k8s: read-replica Deployment and Service (no store, `RollingUpdate`) with routing documented; `GBMS_STORE_ROOT` moved to the writer; optional cosign key Secret mounted at `/keys`; `fsGroupChangePolicy: OnRootMismatch`.
+
 ### Remaining
 
 | Phase | Work | Acceptance |
 |-------|------|------------|
-| 2 | Conformance test against core for the ported engines | Top-k parity with core on a fixture brain |
+| 2 | Vector-index parity with core (needs a shared embeddings fixture) | Top-k parity on natural-language queries |
 | 2 | Rollback detection for followed tags | Republished ancestor refused |
 | 3 | Dockerfile; CI (ruff, mypy, pytest, import-linter); fixture pipeline in Zot | Green pipeline |
 | 3 | Runtime integration behind a flag; agent-builder brain picker; publisher re-sign/index script | Staging agents read brains via MCP |
-| 3 | OpenTelemetry, audit log, k8s manifests | Deployed to a test cluster |
+| 3 | OpenTelemetry, audit log; deploy the k8s base (writer + read replicas) | Deployed to a test cluster |
 | 4 | Removal PRs; `v1.0.0` | No brain read path left in runtime/core |
 
 ---
@@ -475,8 +485,8 @@ Scoring, tokenization and tie-breaking are unchanged from core, so the same brai
 2. **Signer allow-list scope.** One global list (current), or a list per allowed source/namespace (e.g. namespace `acme/` trusts only ACME's workflows)? A per-namespace list is a backwards-compatible extension of the config.
 3. **Index annotation keys.** Keep `ai.alquimia.registry.index.*` for compatibility with agentspace tooling, or move brains to a neutral prefix (e.g. `ai.gaussia.index.*`) and read both during a transition?
 4. ~~**Authoring tooling home.**~~ Decided (issue #2): this service is the authoring home. Ledger is a thin REST client; core drops its `boltzmann` package. Cosign signing of pushed brains returns with keyless OIDC signing.
-6. **Issue #2 questions, answered for now:** write authorization is any `brains:write` holder on any brain (no per-brain owners yet; D6); the working store is a single writer replica on a volume, no Lease (D11); governed brains are served read-only, not converted (D10); embeddings come from an OpenAI-compatible endpoint (§9).
-5. **MCP resources.** Also expose canonical documents as MCP resources (`brain://block/<id>`) so clients can open sources natively? Recommendation: after Phase 1.
+5. **Issue #2 questions, answered for now:** write authorization is any `brains:write` holder on any brain (no per-brain owners yet; D6); the working store is a single writer replica on a volume, no Lease (D11); governed brains are served read-only, not converted (D10); embeddings come from an OpenAI-compatible endpoint (§9).
+6. **MCP resources.** Also expose canonical documents as MCP resources (`brain://block/<id>`) so clients can open sources natively? Recommendation: after Phase 1.
 
 ---
 

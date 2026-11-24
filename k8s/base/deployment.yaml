@@ -4,8 +4,8 @@ metadata:
   name: gaussia-brains-mcp-server
 spec:
   # The writer replica: it owns the working-store volume (ReadWriteOnce), so exactly one runs
-  # and an update replaces it rather than rolling a second one in beside it. Scale reads with a
-  # separate Deployment that leaves GBMS_STORE_ROOT unset (MCP, discovery and search only).
+  # and an update replaces it rather than rolling a second one in beside it. Reads scale with
+  # deployment-read.yaml, which leaves GBMS_STORE_ROOT unset (MCP, discovery and search only).
   replicas: 1
   strategy:
     type: Recreate
@@ -24,6 +24,8 @@ spec:
         runAsUser: 65534
         runAsGroup: 65534
         fsGroup: 65534
+        # Chown the volume only when its root does not already match, not on every start.
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: server
@@ -37,6 +39,8 @@ spec:
             - secretRef: { name: gaussia-brains-mcp-server, optional: true }
           env:
             - { name: HOME, value: /tmp }
+            # The working store (the PVC). Only the writer sets it.
+            - { name: GBMS_STORE_ROOT, value: /var/lib/gbms/brains }
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 10
@@ -58,7 +62,11 @@ spec:
             - { name: tmp, mountPath: /tmp }
             # The working store (GBMS_STORE_ROOT=/var/lib/gbms/brains).
             - { name: store, mountPath: /var/lib/gbms }
+            # Optional cosign public key (GBMS_COSIGN_KEY=/keys/cosign.pub).
+            - { name: cosign-key, mountPath: /keys, readOnly: true }
       volumes:
         - { name: tmp, emptyDir: {} }
+        - name: cosign-key
+          secret: { secretName: gaussia-brains-mcp-server-cosign, optional: true }
         - name: store
           persistentVolumeClaim: { claimName: gaussia-brains-mcp-server-store }

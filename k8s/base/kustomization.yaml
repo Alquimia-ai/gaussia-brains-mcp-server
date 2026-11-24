@@ -11,6 +11,8 @@ resources:
   - pvc.yaml
   - deployment.yaml
   - service.yaml
+  - deployment-read.yaml
+  - service-read.yaml
   - networkpolicy.yaml
 # Set to the image built from ../Dockerfile and pushed to your registry (e.g. ECR), pinned.
 images:

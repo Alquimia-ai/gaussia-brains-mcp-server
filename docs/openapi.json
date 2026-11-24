@@ -1,9 +1,10 @@
 {
   "components": {
     "schemas": {
-      "Body_register_evidence_v1_brains__brain_ref__evidence_post": {
+      "BlockDetail": {
+        "additionalProperties": true,
         "properties": {
-          "branch": {
+          "added_at": {
             "anyOf": [
               {
                 "type": "string"
@@ -12,37 +13,91 @@
                 "type": "null"
               }
             ],
-            "title": "Branch"
+            "title": "Added At"
           },
-          "file": {
-            "contentMediaType": "application/octet-stream",
-            "description": "The source, byte for byte.",
-            "title": "File",
+          "assisted_by": {
+            "items": {},
+            "title": "Assisted By",
+            "type": "array"
+          },
+          "block_id": {
+            "title": "Block Id",
             "type": "string"
           },
-          "license": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "License"
+          "competing_successors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Competing Successors",
+            "type": "array"
           },
-          "media_type": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Media Type"
+          "demoted": {
+            "default": false,
+            "title": "Demoted",
+            "type": "boolean"
           },
-          "origin": {
+          "dependents": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Dependents",
+            "type": "array"
+          },
+          "evidence": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "locator": {
+            "title": "Locator"
+          },
+          "memory_type": {
+            "title": "Memory Type",
+            "type": "string"
+          },
+          "payload": {
+            "title": "Payload"
+          },
+          "producer": {
+            "title": "Producer"
+          },
+          "provenance": {
+            "items": {},
+            "title": "Provenance",
+            "type": "array"
+          },
+          "readable": {
+            "default": true,
+            "title": "Readable",
+            "type": "boolean"
+          },
+          "removed": {
+            "default": false,
+            "title": "Removed",
+            "type": "boolean"
+          },
+          "resolvable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolvable"
+          },
+          "root": {
+            "title": "Root",
+            "type": "string"
+          },
+          "snapshot": {
+            "title": "Snapshot",
+            "type": "string"
+          },
+          "summary": {
             "anyOf": [
               {
                 "type": "string"
@@ -51,13 +106,428 @@
                 "type": "null"
               }
             ],
-            "title": "Origin"
+            "title": "Summary"
+          },
+          "superseded_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded By"
+          },
+          "supersedes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Supersedes",
+            "type": "array"
+          },
+          "text": {
+            "title": "Text"
+          },
+          "tombstoned": {
+            "default": false,
+            "title": "Tombstoned",
+            "type": "boolean"
+          },
+          "unreadable_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Present when the block could not be read.",
+            "title": "Unreadable Reason"
+          },
+          "validation": {
+            "title": "Validation"
+          },
+          "verifies": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "title": "Verifies",
+            "type": "object"
           }
         },
         "required": [
-          "file"
+          "block_id",
+          "memory_type",
+          "snapshot",
+          "root",
+          "verifies"
         ],
-        "title": "Body_register_evidence_v1_brains__brain_ref__evidence_post",
+        "title": "BlockDetail",
+        "type": "object"
+      },
+      "BlockPage": {
+        "additionalProperties": true,
+        "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/components/schemas/BlockRow"
+            },
+            "title": "Blocks",
+            "type": "array"
+          },
+          "memory_type": {
+            "title": "Memory Type",
+            "type": "string"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "snapshot": {
+            "title": "Snapshot",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "memory_type",
+          "snapshot",
+          "total",
+          "blocks"
+        ],
+        "title": "BlockPage",
+        "type": "object"
+      },
+      "BlockRow": {
+        "additionalProperties": true,
+        "properties": {
+          "added_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Added At"
+          },
+          "block_id": {
+            "title": "Block Id",
+            "type": "string"
+          },
+          "demoted": {
+            "default": false,
+            "title": "Demoted",
+            "type": "boolean"
+          },
+          "memory_type": {
+            "title": "Memory Type",
+            "type": "string"
+          },
+          "payload": {
+            "title": "Payload"
+          },
+          "readable": {
+            "default": true,
+            "title": "Readable",
+            "type": "boolean"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "superseded_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded By"
+          },
+          "tombstoned": {
+            "default": false,
+            "title": "Tombstoned",
+            "type": "boolean"
+          },
+          "unreadable_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Present when the block could not be read.",
+            "title": "Unreadable Reason"
+          }
+        },
+        "required": [
+          "block_id",
+          "memory_type"
+        ],
+        "title": "BlockRow",
+        "type": "object"
+      },
+      "BrainStatus": {
+        "additionalProperties": true,
+        "description": "A brain held in the working store, at one branch.",
+        "properties": {
+          "block_count": {
+            "default": 0,
+            "title": "Block Count",
+            "type": "integer"
+          },
+          "branch": {
+            "title": "Branch",
+            "type": "string"
+          },
+          "branches": {
+            "items": {
+              "$ref": "#/components/schemas/BranchView"
+            },
+            "title": "Branches",
+            "type": "array"
+          },
+          "convergence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OpenConvergence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "current_branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Branch"
+          },
+          "default_tag": {
+            "title": "Default Tag",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "governed": {
+            "title": "Governed",
+            "type": "boolean"
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head"
+          },
+          "held": {
+            "title": "Held",
+            "type": "boolean"
+          },
+          "imported_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Imported From"
+          },
+          "mcp": {
+            "additionalProperties": true,
+            "title": "Mcp",
+            "type": "object"
+          },
+          "modules": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ModuleSummary"
+            },
+            "title": "Modules",
+            "type": "object"
+          },
+          "publication": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Publication"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "read_only": {
+            "title": "Read Only",
+            "type": "boolean"
+          },
+          "reference": {
+            "title": "Reference",
+            "type": "string"
+          },
+          "title": {
+            "default": "",
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "held",
+          "default_tag",
+          "governed",
+          "read_only",
+          "branch"
+        ],
+        "title": "BrainStatus",
+        "type": "object"
+      },
+      "BranchList": {
+        "additionalProperties": true,
+        "properties": {
+          "branches": {
+            "items": {
+              "$ref": "#/components/schemas/BranchView"
+            },
+            "title": "Branches",
+            "type": "array"
+          },
+          "remote": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/RemoteBranchView"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Present with `remote=true`.",
+            "title": "Remote"
+          }
+        },
+        "required": [
+          "branches"
+        ],
+        "title": "BranchList",
+        "type": "object"
+      },
+      "BranchView": {
+        "additionalProperties": true,
+        "properties": {
+          "current": {
+            "default": false,
+            "title": "Current",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "published": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published"
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot"
+          },
+          "tag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag"
+          },
+          "unpublished": {
+            "default": false,
+            "title": "Unpublished",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "BranchView",
         "type": "object"
       },
       "CandidateIn": {
@@ -113,6 +583,57 @@
           "evidence"
         ],
         "title": "CandidateIn",
+        "type": "object"
+      },
+      "CandidateVerdict": {
+        "additionalProperties": true,
+        "properties": {
+          "block_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Block Id"
+          },
+          "candidate": {
+            "title": "Candidate"
+          },
+          "conflicts_with": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Conflicts With",
+            "type": "array"
+          },
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "issues": {
+            "items": {},
+            "title": "Issues",
+            "type": "array"
+          },
+          "memory_type": {
+            "title": "Memory Type",
+            "type": "string"
+          },
+          "status": {
+            "description": "`accepted`, `rejected`, ...",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "status",
+          "memory_type"
+        ],
+        "title": "CandidateVerdict",
         "type": "object"
       },
       "CollaboratorIn": {
@@ -275,6 +796,122 @@
         "title": "CommitRequest",
         "type": "object"
       },
+      "CommitResponse": {
+        "additionalProperties": true,
+        "description": "A dry run (``report`` with every verdict, rejected ones included) or a commit.",
+        "properties": {
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
+          "committed": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/CommittedBlock"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Committed"
+          },
+          "dry_run": {
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head"
+          },
+          "provenance": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provenance"
+          },
+          "report": {
+            "$ref": "#/components/schemas/ValidationReport"
+          },
+          "roots": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Roots"
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot"
+          }
+        },
+        "required": [
+          "dry_run",
+          "report"
+        ],
+        "title": "CommitResponse",
+        "type": "object"
+      },
+      "CommittedBlock": {
+        "additionalProperties": true,
+        "properties": {
+          "block_id": {
+            "title": "Block Id",
+            "type": "string"
+          },
+          "memory_type": {
+            "title": "Memory Type",
+            "type": "string"
+          },
+          "payload": {
+            "title": "Payload"
+          }
+        },
+        "required": [
+          "block_id",
+          "memory_type"
+        ],
+        "title": "CommittedBlock",
+        "type": "object"
+      },
       "ConvergeRequest": {
         "properties": {
           "fast_forward": {
@@ -330,6 +967,70 @@
           "from"
         ],
         "title": "ConvergeRequest",
+        "type": "object"
+      },
+      "ConvergenceView": {
+        "additionalProperties": true,
+        "properties": {
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
+          "open": {
+            "title": "Open",
+            "type": "boolean"
+          },
+          "removals_accepted": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Removals Accepted"
+          },
+          "resolved": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved"
+          },
+          "status": {
+            "title": "Status"
+          },
+          "unresolved": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unresolved"
+          }
+        },
+        "required": [
+          "open"
+        ],
+        "title": "ConvergenceView",
         "type": "object"
       },
       "CreateBrainRequest": {
@@ -406,7 +1107,8 @@
               "not_fast_forward",
               "registry_unavailable",
               "needs_human",
-              "internal"
+              "internal",
+              "unauthenticated"
             ],
             "title": "Code",
             "type": "string"
@@ -439,6 +1141,50 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HistoryPage": {
+        "additionalProperties": true,
+        "properties": {
+          "branch": {
+            "title": "Branch",
+            "type": "string"
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "snapshots": {
+            "items": {
+              "$ref": "#/components/schemas/SnapshotRow"
+            },
+            "title": "Snapshots",
+            "type": "array"
+          }
+        },
+        "required": [
+          "branch",
+          "snapshots"
+        ],
+        "title": "HistoryPage",
         "type": "object"
       },
       "JobView": {
@@ -553,6 +1299,116 @@
         "title": "JobView",
         "type": "object"
       },
+      "ModuleSummary": {
+        "additionalProperties": true,
+        "properties": {
+          "block_count": {
+            "title": "Block Count",
+            "type": "integer"
+          },
+          "root": {
+            "title": "Root",
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_count",
+          "root"
+        ],
+        "title": "ModuleSummary",
+        "type": "object"
+      },
+      "OpenConvergence": {
+        "additionalProperties": true,
+        "properties": {
+          "actor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor"
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head"
+          },
+          "open": {
+            "title": "Open",
+            "type": "boolean"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "resolutions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolutions"
+          },
+          "strategy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strategy"
+          },
+          "theirs": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Theirs"
+          }
+        },
+        "required": [
+          "open"
+        ],
+        "title": "OpenConvergence",
+        "type": "object"
+      },
       "ProducerIn": {
         "properties": {
           "id": {
@@ -589,6 +1445,41 @@
         "title": "ProducerIn",
         "type": "object"
       },
+      "Publication": {
+        "additionalProperties": true,
+        "properties": {
+          "reference": {
+            "title": "Reference",
+            "type": "string"
+          },
+          "snapshot": {
+            "title": "Snapshot",
+            "type": "string"
+          },
+          "tag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag"
+          },
+          "up_to_date": {
+            "title": "Up To Date",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "reference",
+          "snapshot",
+          "up_to_date"
+        ],
+        "title": "Publication",
+        "type": "object"
+      },
       "PublishRequest": {
         "description": "Body for publishing a brain to the namespace index.",
         "properties": {
@@ -609,6 +1500,86 @@
           }
         },
         "title": "PublishRequest",
+        "type": "object"
+      },
+      "PublishedBrain": {
+        "additionalProperties": true,
+        "description": "A brain read from the registry: its published manifest.",
+        "properties": {
+          "annotations": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annotations"
+          },
+          "digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Digest"
+          },
+          "mcp": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mcp"
+          },
+          "modules": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Modules",
+            "type": "array"
+          },
+          "reference": {
+            "title": "Reference",
+            "type": "string"
+          },
+          "signature": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signature"
+          },
+          "tag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag"
+          }
+        },
+        "required": [
+          "reference"
+        ],
+        "title": "PublishedBrain",
         "type": "object"
       },
       "PullRequest": {
@@ -695,6 +1666,30 @@
         "title": "ReindexRequest",
         "type": "object"
       },
+      "RemoteBranchView": {
+        "additionalProperties": true,
+        "properties": {
+          "local": {
+            "title": "Local",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "tag": {
+            "title": "Tag",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "tag",
+          "local"
+        ],
+        "title": "RemoteBranchView",
+        "type": "object"
+      },
       "ResolutionRequest": {
         "properties": {
           "block": {
@@ -738,6 +1733,141 @@
           "kind"
         ],
         "title": "ResolutionRequest",
+        "type": "object"
+      },
+      "SearchMatch": {
+        "additionalProperties": true,
+        "properties": {
+          "block_id": {
+            "title": "Block Id",
+            "type": "string"
+          },
+          "content": {
+            "title": "Content"
+          },
+          "locator": {
+            "title": "Locator"
+          },
+          "memory_type": {
+            "title": "Memory Type",
+            "type": "string"
+          },
+          "resolvable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolvable"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SearchSource"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "verified": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified"
+          }
+        },
+        "required": [
+          "block_id",
+          "memory_type"
+        ],
+        "title": "SearchMatch",
+        "type": "object"
+      },
+      "SearchNarrowing": {
+        "additionalProperties": true,
+        "properties": {
+          "dropped_unverified": {
+            "default": 0,
+            "title": "Dropped Unverified",
+            "type": "integer"
+          },
+          "indices_used": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Index kinds that returned candidates.",
+            "title": "Indices Used"
+          },
+          "missing_memory_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Memory Types",
+            "type": "array"
+          },
+          "requested_memory_types": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested Memory Types"
+          },
+          "searched_memory_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Searched Memory Types",
+            "type": "array"
+          },
+          "semantic": {
+            "title": "Semantic"
+          },
+          "semantic_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why vector search did not score the query (null when it did): not_routed, no_vector_index, no_vectors, model_mismatch, embedding_failed, not_text, unavailable.",
+            "title": "Semantic Reason"
+          }
+        },
+        "title": "SearchNarrowing",
         "type": "object"
       },
       "SearchRequest": {
@@ -809,6 +1939,202 @@
         "title": "SearchRequest",
         "type": "object"
       },
+      "SearchResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Working-store brains.",
+            "title": "Branch"
+          },
+          "narrowing": {
+            "$ref": "#/components/schemas/SearchNarrowing"
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Registry brains.",
+            "title": "Reference"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/SearchMatch"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Working-store brains.",
+            "title": "Snapshot"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "verified_against": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Verified Against",
+            "type": "object"
+          }
+        },
+        "required": [
+          "results",
+          "truncated",
+          "narrowing"
+        ],
+        "title": "SearchResponse",
+        "type": "object"
+      },
+      "SearchSource": {
+        "additionalProperties": true,
+        "properties": {
+          "block_id": {
+            "title": "Block Id",
+            "type": "string"
+          },
+          "locator": {
+            "title": "Locator"
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "title": "SearchSource",
+        "type": "object"
+      },
+      "SnapshotRow": {
+        "additionalProperties": true,
+        "properties": {
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "governed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Governed"
+          },
+          "labels": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Labels"
+          },
+          "modules": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ModuleSummary"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Modules"
+          },
+          "parents": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parents"
+          },
+          "pruned": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The snapshot is no longer held; the chain ends.",
+            "title": "Pruned"
+          },
+          "published": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published"
+          },
+          "reconciliation": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reconciliation"
+          },
+          "snapshot": {
+            "title": "Snapshot",
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot"
+        ],
+        "title": "SnapshotRow",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -848,6 +2174,52 @@
         ],
         "title": "ValidationError",
         "type": "object"
+      },
+      "ValidationReport": {
+        "additionalProperties": true,
+        "properties": {
+          "checks": {
+            "items": {},
+            "title": "Checks",
+            "type": "array"
+          },
+          "clean": {
+            "title": "Clean",
+            "type": "boolean"
+          },
+          "committable": {
+            "title": "Committable",
+            "type": "integer"
+          },
+          "producer": {
+            "title": "Producer"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/CandidateVerdict"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "task_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Id"
+          }
+        },
+        "required": [
+          "clean",
+          "committable",
+          "results"
+        ],
+        "title": "ValidationReport",
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -858,7 +2230,7 @@
     }
   },
   "info": {
-    "description": "Boltzmann brains over REST: discovery, and the full lifecycle -- create, evidence, commits, branches, push/pull, converge, import -- over the service's working store. Lifecycle errors carry a stable `code`: `usage` (400), `not_found` (404), `refused_protocol` (422), `refused_policy` (403), `rejected_candidates` (422), `not_fast_forward` (409), `registry_unavailable` (502), `needs_human` (409), `internal` (500). Long operations answer 202 with a job (`GET /v1/jobs/{id}`).",
+    "description": "Boltzmann brains over REST: discovery, and the full lifecycle -- create, evidence, commits, branches, push/pull, converge, import -- over the service's working store. Lifecycle errors carry a stable `code`: `usage` (400), `not_found` (404), `refused_protocol` (422), `refused_policy` (403), `rejected_candidates` (422), `not_fast_forward` (409), `registry_unavailable` (502), `needs_human` (409), `internal` (500), `unauthenticated` (401). Long operations answer 202 with a job (`GET /v1/jobs/{id}`).",
     "title": "Gaussia Brains MCP Server",
     "version": "0.1.0"
   },
@@ -988,7 +2360,7 @@
         ]
       },
       "post": {
-        "description": "Create an empty, ungoverned brain in the working store.\n\nIts first evidence or commit creates its history.",
+        "description": "Create an empty, ungoverned brain in the working store.\n\nIts first evidence or commit creates its history. A reference with a path\nsegment the routes use (``history``, ``blocks``, ``branches``, ...) is\nrefused with ``usage``.",
         "operationId": "create_brain_v1_brains_post",
         "requestBody": {
           "content": {
@@ -1005,9 +2377,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Create Brain V1 Brains Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/BrainStatus"
                 }
               }
             },
@@ -1022,6 +2392,16 @@
               }
             },
             "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "403": {
             "content": {
@@ -1062,6 +2442,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           },
           "502": {
             "content": {
@@ -1188,7 +2578,7 @@
     },
     "/v1/brains/{brain_ref}": {
       "get": {
-        "description": "Return detail for a single brain.\n\nA brain held in the working store reports its status: modules and block\ncounts, head, branches, any open convergence, and its publication, with\nthe branch head as ``ETag`` (send it back as ``If-Match``). Any other\nbrain reports its published manifest.\n\n*brain_ref* may be a short reference such as ``brains/my-brain:latest`` or a\nfull OCI reference such as ``registry.example.com/acme/handbook:main``.",
+        "description": "Return detail for a single brain.\n\nA brain held in the working store reports its status: modules and block\ncounts, head, branches, any open convergence, and its publication, with\nthe branch head as ``ETag`` (send it back as ``If-Match``). Any other\nbrain reports its published manifest.\n\n*brain_ref* may be a short reference such as ``brains/my-brain:latest`` or a\nfull OCI reference such as ``registry.example.com/acme/handbook:main``.\nErrors carry the lifecycle's stable ``code``.",
         "operationId": "get_brain_v1_brains__brain_ref__get",
         "parameters": [
           {
@@ -1224,23 +2614,99 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Brain V1 Brains  Brain Ref  Get",
-                  "type": "object"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/BrainStatus"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PublishedBrain"
+                    }
+                  ],
+                  "title": "Response Get Brain V1 Brains  Brain Ref  Get"
                 }
               }
             },
             "description": "Successful Response"
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad Gateway"
           }
         },
         "security": [
@@ -1301,9 +2767,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Block V1 Brains  Brain Ref  Blocks  Block Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/BlockDetail"
                 }
               }
             },
@@ -1318,6 +2782,16 @@
               }
             },
             "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "403": {
             "content": {
@@ -1358,6 +2832,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           },
           "502": {
             "content": {
@@ -1412,9 +2896,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Branches V1 Brains  Brain Ref  Branches Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/BranchList"
                 }
               }
             },
@@ -1429,6 +2911,16 @@
               }
             },
             "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "403": {
             "content": {
@@ -1470,6 +2962,16 @@
             },
             "description": "Unprocessable Entity"
           },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
           "502": {
             "content": {
               "application/json": {
@@ -1492,6 +2994,7 @@
         ]
       },
       "post": {
+        "description": "Create a branch; a name with a `branches` segment or ending in `push` is ``usage``.",
         "operationId": "create_branch_v1_brains__brain_ref__branches_post",
         "parameters": [
           {
@@ -1501,6 +3004,24 @@
             "schema": {
               "title": "Brain Ref",
               "type": "string"
+            }
+          },
+          {
+            "description": "The branch head the client last read; the write is refused with not_fast_forward if the head moved since.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch head the client last read; the write is refused with not_fast_forward if the head moved since.",
+              "title": "If-Match"
             }
           }
         ],
@@ -1537,6 +3058,16 @@
             },
             "description": "Bad Request"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
           "403": {
             "content": {
               "application/json": {
@@ -1576,6 +3107,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           },
           "502": {
             "content": {
@@ -1631,6 +3172,24 @@
               "title": "Force",
               "type": "boolean"
             }
+          },
+          {
+            "description": "The branch head the client last read; the write is refused with not_fast_forward if the head moved since.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch head the client last read; the write is refused with not_fast_forward if the head moved since.",
+              "title": "If-Match"
+            }
           }
         ],
         "responses": {
@@ -1655,6 +3214,16 @@
               }
             },
             "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "403": {
             "content": {
@@ -1695,6 +3264,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           },
           "502": {
             "content": {
@@ -1740,6 +3319,24 @@
               "title": "Name",
               "type": "string"
             }
+          },
+          {
+            "description": "The branch head the client last read; the write is refused with not_fast_forward if the head moved since.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch head the client last read; the write is refused with not_fast_forward if the head moved since.",
+              "title": "If-Match"
+            }
           }
         ],
         "requestBody": {
@@ -1777,6 +3374,16 @@
               }
             },
             "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "403": {
             "content": {
@@ -1817,6 +3424,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           },
           "502": {
             "content": {
@@ -1888,9 +3505,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Commit V1 Brains  Brain Ref  Commits Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/CommitResponse"
                 }
               }
             },
@@ -1905,6 +3520,16 @@
               }
             },
             "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "403": {
             "content": {
@@ -1945,6 +3570,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           },
           "502": {
             "content": {
@@ -1981,6 +3616,24 @@
               "title": "Brain Ref",
               "type": "string"
             }
+          },
+          {
+            "description": "The branch head the client last read; the write is refused with not_fast_forward if the head moved since.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch head the client last read; the write is refused with not_fast_forward if the head moved since.",
+              "title": "If-Match"
+            }
           }
         ],
         "requestBody": {
@@ -2011,6 +3664,16 @@
               }
             },
             "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "403": {
             "content": {
@@ -2051,6 +3714,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           },
           "502": {
             "content": {
@@ -2093,9 +3766,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Convergence V1 Brains  Brain Ref  Convergence Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ConvergenceView"
                 }
               }
             },
@@ -2110,6 +3781,16 @@
               }
             },
             "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "403": {
             "content": {
@@ -2150,6 +3831,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           },
           "502": {
             "content": {
@@ -2185,6 +3876,24 @@
               "title": "Brain Ref",
               "type": "string"
             }
+          },
+          {
+            "description": "The branch head the client last read; the write is refused with not_fast_forward if the head moved since.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch head the client last read; the write is refused with not_fast_forward if the head moved since.",
+              "title": "If-Match"
+            }
           }
         ],
         "responses": {
@@ -2209,6 +3918,16 @@
               }
             },
             "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "403": {
             "content": {
@@ -2250,6 +3969,16 @@
             },
             "description": "Unprocessable Entity"
           },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
           "502": {
             "content": {
               "application/json": {
@@ -2283,6 +4012,24 @@
             "schema": {
               "title": "Brain Ref",
               "type": "string"
+            }
+          },
+          {
+            "description": "The branch head the client last read; the write is refused with not_fast_forward if the head moved since.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch head the client last read; the write is refused with not_fast_forward if the head moved since.",
+              "title": "If-Match"
             }
           }
         ],
@@ -2326,6 +4073,16 @@
             },
             "description": "Bad Request"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
           "403": {
             "content": {
               "application/json": {
@@ -2365,6 +4122,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           },
           "502": {
             "content": {
@@ -2401,6 +4168,24 @@
               "title": "Brain Ref",
               "type": "string"
             }
+          },
+          {
+            "description": "The branch head the client last read; the write is refused with not_fast_forward if the head moved since.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch head the client last read; the write is refused with not_fast_forward if the head moved since.",
+              "title": "If-Match"
+            }
           }
         ],
         "responses": {
@@ -2425,6 +4210,16 @@
               }
             },
             "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "403": {
             "content": {
@@ -2465,6 +4260,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           },
           "502": {
             "content": {
@@ -2501,6 +4306,24 @@
               "title": "Brain Ref",
               "type": "string"
             }
+          },
+          {
+            "description": "The branch head the client last read; the write is refused with not_fast_forward if the head moved since.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch head the client last read; the write is refused with not_fast_forward if the head moved since.",
+              "title": "If-Match"
+            }
           }
         ],
         "requestBody": {
@@ -2536,6 +4359,16 @@
             },
             "description": "Bad Request"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
           "403": {
             "content": {
               "application/json": {
@@ -2576,6 +4409,16 @@
             },
             "description": "Unprocessable Entity"
           },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
           "502": {
             "content": {
               "application/json": {
@@ -2600,7 +4443,7 @@
     },
     "/v1/brains/{brain_ref}/evidence": {
       "post": {
-        "description": "Register a source as canonical evidence (multipart). Identical bytes are a no-op.",
+        "description": "Register a source as canonical evidence (multipart). Identical bytes are a no-op.\n\nA source larger than ``GBMS_STORE_MAX_EVIDENCE_BYTES`` is ``usage`` (413).",
         "operationId": "register_evidence_v1_brains__brain_ref__evidence_post",
         "parameters": [
           {
@@ -2635,7 +4478,29 @@
           "content": {
             "multipart/form-data": {
               "schema": {
-                "$ref": "#/components/schemas/Body_register_evidence_v1_brains__brain_ref__evidence_post"
+                "properties": {
+                  "branch": {
+                    "type": "string"
+                  },
+                  "file": {
+                    "description": "The source, byte for byte.",
+                    "format": "binary",
+                    "type": "string"
+                  },
+                  "license": {
+                    "type": "string"
+                  },
+                  "media_type": {
+                    "type": "string"
+                  },
+                  "origin": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file"
+                ],
+                "type": "object"
               }
             }
           },
@@ -2663,6 +4528,16 @@
               }
             },
             "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "403": {
             "content": {
@@ -2694,6 +4569,16 @@
             },
             "description": "Conflict"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The body is larger than accepted."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -2703,6 +4588,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           },
           "502": {
             "content": {
@@ -2792,9 +4687,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get History V1 Brains  Brain Ref  History Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HistoryPage"
                 }
               }
             },
@@ -2809,6 +4702,16 @@
               }
             },
             "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "403": {
             "content": {
@@ -2850,6 +4753,16 @@
             },
             "description": "Unprocessable Entity"
           },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
           "502": {
             "content": {
               "application/json": {
@@ -2874,7 +4787,7 @@
     },
     "/v1/brains/{brain_ref}/import": {
       "post": {
-        "description": "Migrate an existing brain into the working store (job).\n\n``application/json`` (:class:`ImportRequest`) imports from the registry;\n``multipart/form-data`` with a ``layout`` file (a ``.tar``/``.tar.gz`` of a\nbrain's OCI layout) imports an upload. Governed brains are imported as they\nare and served read-only.",
+        "description": "Migrate an existing brain into the working store (job).\n\n``application/json`` (:class:`ImportRequest`) imports from the registry;\n``multipart/form-data`` with a ``layout`` file (a ``.tar``/``.tar.gz`` of a\nbrain's OCI layout) imports an upload. Governed brains are imported as they\nare and served read-only. An upload larger than ``GBMS_STORE_MAX_IMPORT_BYTES``\nis ``usage`` (413); a new brain named with a reserved segment is ``usage``.",
         "operationId": "import_brain_v1_brains__brain_ref__import_post",
         "parameters": [
           {
@@ -2987,6 +4900,16 @@
             },
             "description": "Bad Request"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
           "403": {
             "content": {
               "application/json": {
@@ -3017,6 +4940,16 @@
             },
             "description": "Conflict"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The body is larger than accepted."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -3026,6 +4959,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           },
           "502": {
             "content": {
@@ -3124,9 +5067,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Blocks V1 Brains  Brain Ref  Modules  Memory Type  Blocks Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/BlockPage"
                 }
               }
             },
@@ -3141,6 +5082,16 @@
               }
             },
             "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "403": {
             "content": {
@@ -3181,6 +5132,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           },
           "502": {
             "content": {
@@ -3276,6 +5237,24 @@
               "title": "Brain Ref",
               "type": "string"
             }
+          },
+          {
+            "description": "The branch head the client last read; the write is refused with not_fast_forward if the head moved since.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The branch head the client last read; the write is refused with not_fast_forward if the head moved since.",
+              "title": "If-Match"
+            }
           }
         ],
         "requestBody": {
@@ -3313,6 +5292,16 @@
               }
             },
             "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "403": {
             "content": {
@@ -3353,6 +5342,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           },
           "502": {
             "content": {
@@ -3406,9 +5405,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Search V1 Brains  Brain Ref  Search Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SearchResponse"
                 }
               }
             },
@@ -3423,6 +5420,16 @@
               }
             },
             "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "403": {
             "content": {
@@ -3463,6 +5470,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           },
           "502": {
             "content": {
@@ -3632,6 +5649,16 @@
             },
             "description": "Bad Request"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
           "403": {
             "content": {
               "application/json": {
@@ -3671,6 +5698,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           },
           "502": {
             "content": {
@@ -3729,6 +5766,16 @@
             },
             "description": "Bad Request"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
           "403": {
             "content": {
               "application/json": {
@@ -3768,6 +5815,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           },
           "502": {
             "content": {
@@ -3827,6 +5884,16 @@
             },
             "description": "Bad Request"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
           "403": {
             "content": {
               "application/json": {
@@ -3866,6 +5933,16 @@
               }
             },
             "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
           },
           "502": {
             "content": {

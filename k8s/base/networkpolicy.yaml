@@ -7,9 +7,10 @@ kind: NetworkPolicy
 metadata:
   name: gaussia-brains-mcp-server
 spec:
+  # Writer and read replicas both carry this label.
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: gaussia-brains-mcp-server
+      alquimia.ai/component: brains-mcp
   policyTypes: ["Ingress"]
   ingress:
     - from:

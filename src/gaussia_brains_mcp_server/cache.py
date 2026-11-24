@@ -264,7 +264,30 @@ class BrainCache:
         modules: list[MemoryType] | None,
         verification: VerificationPolicy,
     ) -> tuple[Brain, str]:
-        """Pull *reference*:*tag* into a fresh brain; return it and the config digest."""
+        """Pull *reference*:*tag* into a fresh brain; return it and the config digest.
+
+        ``Brain.fetch``/``pull`` await the registry but install, verify and
+        rebuild indices synchronously in between, which would stall every
+        request on this loop. So the whole open runs to completion on a
+        private event loop in a worker thread. The brain is new and private
+        until returned, so a cancelled caller abandoning the thread is safe.
+        """
+
+        def run() -> tuple[Brain, str]:
+            return asyncio.run(
+                self._open_blocking(reference, tag, modules, verification)
+            )
+
+        return await asyncio.to_thread(run)
+
+    async def _open_blocking(
+        self,
+        reference: str,
+        tag: str,
+        modules: list[MemoryType] | None,
+        verification: VerificationPolicy,
+    ) -> tuple[Brain, str]:
+        """The body of :meth:`_open`; runs on a worker thread's own loop."""
         brain = self._brain_factory()
         # Pinned: the fetch, the judgement of what was fetched and the pull
         # that installs it all see one manifest even if the tag moves.

@@ -1,10 +1,25 @@
-"""Hybrid query planner for the Boltzmann Brain protocol (ported from core, unchanged).
+"""Hybrid query planner for the Boltzmann Brain protocol (ported from core).
+
+Divergences from core, each deliberate:
+
+* ``truncated`` and ``verified_against`` are populated on the bundle (core
+  left both at their defaults, so a client could never tell a cut answer).
+* Range routing only fires on a query that parses as a range (``a..b`` or
+  ``>x`` as a single token) and the parsed bounds are handed to the B+ tree;
+  core routed any text containing ``..`` or starting with ``<``/``>`` to the
+  structural indices alone, so prose such as "deploy failed... why?" found
+  nothing. In AUTO mode a query the structural indices cannot answer falls
+  back to the inverted index.
+* The bundle carries a :class:`PlanReport` saying which index kinds were
+  consulted and whether vector search took part, so ``narrowing.semantic``
+  reports what happened rather than what was possible.
 
 The planner implements the ``QueryPlanner`` protocol.  It reads the **same
 index objects** the brain rebuilds, never its own copies.  Index selection is
 driven by query shape: exact identifier → hash map; ordered / range predicate
 → B⁺ tree; term match → inverted; natural-language intent → vector;
-neighbourhood or traversal → graph; categorical filter → bitmap.
+neighbourhood or traversal → graph. (Bitmap, for categorical filters, is
+never routed to here or in core, and is not registered.)
 
 Every result path ends in hash-map resolution and verification, per the
 conformance invariants.
@@ -13,6 +28,7 @@ conformance invariants.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from boltzmann import BlockId, IndexKind, MemoryType
@@ -34,8 +50,59 @@ from boltzmann.query import (
     SourceRef,
 )
 from loguru import logger
+from pydantic import PrivateAttr
 
 from gaussia_brains_mcp_server.indices.engines import _score_to_str as _score_str
+
+_RANGE_PAIR = re.compile(r"^([^\s.]+)\.\.([^\s.]+)$")
+_RANGE_BOUND = re.compile(r"^(>=|<=|>|<)([^\s<>=]+)$")
+
+
+@dataclass
+class PlanReport:
+    """What the planner did for one query (not part of the protocol bundle).
+
+    Attributes:
+        routed: Index kinds the query shape selected, in priority order.
+        consulted: Index kinds that were actually searched (an index the
+            module does not carry is skipped), including any fallback.
+        contributed: Index kinds that returned at least one candidate.
+        fallback: The index kind added because the routed ones found nothing.
+        vector_used: Whether a vector index scored the query for some module.
+        vector_reason: Why vector search did not take part, when it did not:
+            ``not_routed``, ``no_vector_index``, ``no_vectors``,
+            ``model_mismatch``, ``embedding_failed`` or ``not_text``.
+    """
+
+    routed: list[str] = field(default_factory=list)
+    consulted: list[str] = field(default_factory=list)
+    contributed: list[str] = field(default_factory=list)
+    fallback: str | None = None
+    vector_used: bool = False
+    vector_reason: str | None = "not_routed"
+
+
+class PlannedEvidenceBundle(EvidenceBundle):
+    """An ``EvidenceBundle`` that also carries the :class:`PlanReport`.
+
+    A private attribute, so the bundle serializes exactly like the SDK's and
+    survives ``Brain.search``'s ``model_copy`` (private state is copied).
+    """
+
+    _plan: PlanReport | None = PrivateAttr(default=None)
+
+    @property
+    def plan(self) -> PlanReport | None:
+        return self._plan
+
+
+def plan_report(bundle: EvidenceBundle) -> PlanReport | None:
+    """The planner's report for *bundle*, or ``None`` from another planner."""
+    return (
+        getattr(bundle, "_plan", None)
+        if isinstance(bundle, PlannedEvidenceBundle)
+        else None
+    )
 
 
 class HybridQueryPlanner(QueryPlanner):
@@ -84,8 +151,25 @@ class HybridQueryPlanner(QueryPlanner):
         return None
 
     @staticmethod
-    def _looks_like_range(text: str) -> bool:
-        return ".." in text or text.startswith(">") or text.startswith("<")
+    def _parse_range(text: str) -> dict[str, str] | None:
+        """B+ tree bounds for a range-shaped query, or ``None``.
+
+        Only a single token counts: ``a..b`` (inclusive) or ``>x`` / ``>=x`` /
+        ``<x`` / ``<=x``. Diverges from core, which treated any text containing
+        ``..`` or starting with ``<``/``>`` as a range and searched it
+        structurally only -- so prose with an ellipsis matched nothing.
+        """
+        text = text.strip()
+        if m := _RANGE_PAIR.match(text):
+            return {"gte": m.group(1), "lte": m.group(2)}
+        if m := _RANGE_BOUND.match(text):
+            op = {">": "gt", ">=": "gte", "<": "lt", "<=": "lte"}[m.group(1)]
+            return {op: m.group(2)}
+        return None
+
+    @classmethod
+    def _looks_like_range(cls, text: str) -> bool:
+        return cls._parse_range(text) is not None
 
     @staticmethod
     def _looks_like_nl(text: str) -> bool:
@@ -269,7 +353,9 @@ class HybridQueryPlanner(QueryPlanner):
         mode = hints.mode
         text = (query.text or "").strip()
 
-        bundle = EvidenceBundle()
+        report = PlanReport()
+        truncated = False
+        matches: list[Match] = []
 
         # Determine which memory types to search
         memory_types = list(modules.keys())
@@ -282,26 +368,67 @@ class HybridQueryPlanner(QueryPlanner):
         # scores depend only on rank, so fusing per module and merging the
         # results would tie each module's best match regardless of relevance.
         kinds = self._route_text(text, mode)
+        report.routed = [k.value for k in kinds]
+        if IndexKind.VECTOR in kinds:
+            report.vector_reason = "no_vector_index"
         owners: dict[BlockId, list[MemoryType]] = {}
         rankings: list[list[tuple[BlockId, float]]] = []
-        for kind in kinds:
-            if kind is IndexKind.GRAPH:
-                continue  # expanded after fusion, from the strongest hits
+        range_query = self._parse_range(text)
+
+        def consult(kind: IndexKind) -> None:
+            nonlocal truncated
             merged: dict[BlockId, float] = {}
             for mt in memory_types:
                 idx = self._pick(mt, kind)
                 if idx is None:
                     logger.debug(f"planner: no {kind.value} index for {mt.value}")
                     continue
-                for bid, score in idx.search(text, limit=limit):
+                if kind.value not in report.consulted:
+                    report.consulted.append(kind.value)
+                # One more than the limit, so a full page says whether more exist.
+                probe = limit + 1
+                if kind is IndexKind.BTREE and range_query is not None:
+                    found = idx.search(range_query, limit=probe)
+                elif kind is IndexKind.VECTOR and hasattr(idx, "search_with_status"):
+                    found, reason = idx.search_with_status(text, limit=probe)
+                    if reason is None:
+                        report.vector_used = True
+                        report.vector_reason = None
+                    elif not report.vector_used:
+                        report.vector_reason = reason
+                else:
+                    found = idx.search(text, limit=probe)
+                for bid, score in found:
                     offered_by = owners.setdefault(bid, [])
                     if mt not in offered_by:
                         offered_by.append(mt)
                     merged[bid] = max(score, merged.get(bid, score))
             if merged:
+                report.contributed.append(kind.value)
                 ranked = sorted(merged.items(), key=lambda i: (-i[1], str(i[0])))
+                if len(ranked) > limit:
+                    truncated = True
                 rankings.append(ranked[:limit])
 
+        for kind in kinds:
+            if kind is IndexKind.GRAPH:
+                continue  # expanded after fusion, from the strongest hits
+            consult(kind)
+
+        # A query the structural indices could not answer (a range or an id
+        # that matched nothing) is still text: try the terms. AUTO only -- an
+        # explicit mode is the caller's choice of index. Diverges from core.
+        if (
+            not rankings
+            and mode is RetrievalMode.AUTO
+            and IndexKind.INVERTED not in kinds
+            and text
+        ):
+            report.fallback = IndexKind.INVERTED.value
+            consult(IndexKind.INVERTED)
+
+        if len({bid for ranking in rankings for bid, _ in ranking}) > limit:
+            truncated = True
         fused = self._fuse(rankings, limit) if rankings else {}
         by_module: dict[MemoryType, dict[BlockId, float]] = {}
         for bid, score in fused.items():
@@ -317,14 +444,28 @@ class HybridQueryPlanner(QueryPlanner):
                 mt, by_module.get(mt, {}), hints, limit, text
             )
             if candidates:
-                bundle.matches.extend(self._verify(mt, modules[mt], candidates))
+                matches.extend(self._verify(mt, modules[mt], candidates))
 
         # `limit` is the caller's top-k over the query. Graph expansion runs
         # per module after fusion, so the union can exceed it; ties break on
         # the block id so equal scores do not reorder between processes.
-        bundle.matches.sort(key=lambda m: (-float(m.score or 0.0), str(m.block_id)))
-        del bundle.matches[limit:]
+        matches.sort(key=lambda m: (-float(m.score or 0.0), str(m.block_id)))
+        if len(matches) > limit:
+            truncated = True
+            del matches[limit:]
 
+        verified_against = {}
+        for mt in memory_types:
+            root = getattr(modules[mt], "root", None)
+            if root is not None:
+                verified_against[mt] = root
+
+        bundle = PlannedEvidenceBundle(
+            matches=matches,
+            verified_against=verified_against,
+            truncated=truncated,
+        )
+        bundle._plan = report
         return bundle
 
     def _expand_graph(

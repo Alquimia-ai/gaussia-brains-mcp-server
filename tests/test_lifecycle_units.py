@@ -39,7 +39,7 @@ from gaussia_brains_mcp_server.lifecycle.service import (
         (UnmergedBranchError("x"), "refused_protocol", 422),
         (RollbackError("x"), "refused_protocol", 422),
         (DistributionError("x"), "registry_unavailable", 502),
-        (ValueError("x"), "usage", 400),
+        (ValueError("x"), "internal", 500),
         (RuntimeError("x"), "internal", 500),
     ],
 )
@@ -60,6 +60,7 @@ def test_codes_map_one_to_one_to_ledger_outcomes() -> None:
         "registry_unavailable",
         "needs_human",
         "internal",
+        "unauthenticated",
     }
     with pytest.raises(ValueError):
         errors.LifecycleError("nope", "x")

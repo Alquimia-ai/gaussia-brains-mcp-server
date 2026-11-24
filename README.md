@@ -14,7 +14,7 @@ Implemented and tested:
 - Per-brain MCP over Streamable HTTP (`/mcp/<brain-ref>`).
 - REST discovery and management endpoints (`/v1/brains`).
 - The full brain lifecycle over REST: working store per brain, evidence, commits, browse, history, branches, push/pull, converge, import, jobs (see [the lifecycle API](#lifecycle-api)).
-- Search engines ported from core (BM25 with accent folding, B+ tree, graph, bitmap, vector via an OpenAI-compatible embeddings endpoint), shared by MCP and REST.
+- Search engines ported from core (hash map, BM25 with accent folding, B+ tree, graph, vector via an OpenAI-compatible embeddings endpoint; bitmap is ported but, as in core, not registered), shared by MCP and REST.
 - Configurable short brain references such as `brains/my-brain:latest`.
 - OCI registry client (`oras`), brain cache, and namespace-index publishing.
 - Optional cosign signature verification (`GBMS_SIGNATURE_POLICY=off|warn|required`).

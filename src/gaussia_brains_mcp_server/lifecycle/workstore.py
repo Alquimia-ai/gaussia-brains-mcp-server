@@ -20,6 +20,10 @@ this process and an ``flock`` on ``.write.lock`` so a second process that
 mounts the same volume by mistake is refused rather than interleaved. Reads do
 not lock: they open a separate handle pinned to a snapshot, and every snapshot
 is immutable while the pointers that name them are replaced atomically.
+
+Blocking work done while the lock is held runs in a worker thread through
+:func:`run_locked_thread`, which never lets the lock go while that thread is
+still running -- not even when the coroutine waiting on it is cancelled.
 """
 
 from __future__ import annotations
@@ -30,10 +34,11 @@ import fcntl
 import hashlib
 import json
 import os
+import shutil
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -61,6 +66,50 @@ META_FILE = "brain.json"
 LAYOUT_DIR = "layout"
 LOCK_FILE = ".write.lock"
 BRANCH_TAG_PREFIX = "br."
+
+
+async def run_locked_thread[T](fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+    """Run blocking *fn* in a worker thread that is never abandoned.
+
+    ``asyncio.to_thread`` cannot stop a thread: cancelling the awaiting
+    coroutine only stops the waiting. Under a brain's write lock that would
+    release the lock while the thread still mutates the brain. Here a cancel
+    is deferred until the thread has finished, then re-raised, so whatever
+    lock the caller holds is released only once nothing is using the brain.
+    """
+    future = asyncio.ensure_future(asyncio.to_thread(fn, *args, **kwargs))
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        while not future.done():
+            try:
+                await asyncio.shield(future)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:  # noqa: BLE001 - the cancel is what is reported
+                break
+        if not future.cancelled() and future.exception() is not None:
+            logger.debug(
+                "worker thread ended with {!r} after its caller was cancelled",
+                future.exception(),
+            )
+        raise
+
+
+def run_coroutine_in_thread[T](factory: Callable[[], Awaitable[T]]) -> T:
+    """Run the coroutine *factory* makes on a private event loop in this thread.
+
+    For SDK coroutines (``Brain.push``/``pull``/``fetch``) whose awaits are
+    registry I/O but which do heavy synchronous work between them (packing,
+    hashing, installing, rebuilding indices). Called from a worker thread
+    (via :func:`run_locked_thread`) it keeps that work off the server's loop.
+    The registry clients hold no loop-bound state, so a private loop is safe.
+    """
+
+    async def main() -> T:
+        return await factory()
+
+    return asyncio.run(main())
 
 
 def _now() -> str:
@@ -166,6 +215,9 @@ class BrainHandle:
         self._readers_lock = threading.Lock()
         #: Who holds the write lock and doing what, for a refusal message.
         self.busy_with: str | None = None
+        #: Set (under the write lock) when the brain's directory was removed;
+        #: a write queued behind the removal is refused rather than recreating it.
+        self.discarded = False
 
     # -- paths ----------------------------------------------------------------- #
 
@@ -253,7 +305,10 @@ class BrainHandle:
         """A read handle pinned to *snapshot*, exclusive for the duration.
 
         Opening a brain rebuilds its structural indices, so handles are kept
-        (a few per brain, least recently used dropped first).
+        (a few per brain, least recently used dropped first). A kept handle
+        also keeps the head pointer as it was when opened: anything that
+        depends on the *current* pointers (an open convergence) reads through
+        :meth:`fresh_reader` instead.
         """
         key = str(snapshot)
         with self._readers_lock:
@@ -268,6 +323,14 @@ class BrainHandle:
                     self._readers.popitem(last=False)
         with handle.lock:
             yield handle
+
+    def fresh_reader(self) -> Brain:
+        """A brain opened now at the current head, never cached.
+
+        For reads that compare against the live pointers (the reconcile state
+        names the head it was started on); not to be written through.
+        """
+        return self._open()
 
     def _open(self, snapshot: Snapshot | None = None) -> Brain:
         provider = self._provider()
@@ -297,6 +360,10 @@ class BrainHandle:
             ) from exc
         lock_file = None
         try:
+            if self.discarded:
+                raise LifecycleError(
+                    NOT_FOUND, f"brain {self.reference} is not held by this service"
+                )
             lock_file = open(self.directory / LOCK_FILE, "a+")  # noqa: SIM115
             try:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -434,14 +501,35 @@ class WorkingStore:
         return handle
 
     def discard(self, reference: str) -> None:
-        """Remove a brain that never got a history (a failed import)."""
-        import shutil
-
+        """Remove a brain's directory. Blocking; callers hold its write lock."""
         with self._lock:
             self._handles.pop(reference, None)
             directory = self._directory(reference)
             if directory.is_dir():
                 shutil.rmtree(directory)
+
+    async def discard_if_empty(self, handle: BrainHandle) -> bool:
+        """Remove a brain that never got a history (a failed import).
+
+        Takes the brain's write lock and re-checks under it: the brain is
+        visible from the moment it was created, so another client may have
+        written to it in the meantime, and that brain is kept. Returns whether
+        it was removed.
+        """
+        async with handle.writing("discarding an empty brain"):
+            heads = await run_locked_thread(handle.heads)
+            if heads.head is not None:
+                logger.info(
+                    "Working store: kept {}: it got a history after all",
+                    handle.reference,
+                )
+                return False
+            handle.discarded = True
+            handle.reset_writer()
+            handle.forget_readers()
+            await run_locked_thread(self.discard, handle.reference)
+        logger.info("Working store: discarded empty {}", handle.reference)
+        return True
 
     def list(self) -> list[BrainMeta]:
         found: list[BrainMeta] = []

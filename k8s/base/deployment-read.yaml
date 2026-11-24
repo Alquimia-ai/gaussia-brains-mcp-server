@@ -1,0 +1,64 @@
+# Read replicas: MCP, discovery and search of *published* brains (proposal §17.2). No working
+# store -- GBMS_STORE_ROOT is unset and no volume is mounted -- so every lifecycle write answers
+# refused_policy, and brains that exist only in the writer's working store are not visible here.
+# Stateless, so it scales and rolls like any web Deployment.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaussia-brains-mcp-server-read
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gaussia-brains-mcp-server-read
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gaussia-brains-mcp-server-read
+        alquimia.ai/component: brains-mcp
+    spec:
+      serviceAccountName: gaussia-brains-mcp-server
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: server
+          image: gaussia-brains-mcp-server
+          ports:
+            - { name: http, containerPort: 8000 }
+          envFrom:
+            - configMapRef: { name: gaussia-brains-mcp-server }
+            # Shares the writer's optional Secret. Pull-only registry credentials suffice here;
+            # give the read replicas their own Secret in an overlay if the writer's can push.
+            - secretRef: { name: gaussia-brains-mcp-server, optional: true }
+          env:
+            - { name: HOME, value: /tmp }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            # Roughly 8 KiB of heap per block, times GBMS_CACHE_MAX_BRAINS loaded brains.
+            requests: { cpu: 500m, memory: 1Gi }
+            limits: { memory: 4Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            # oras pulls into temporary directories.
+            - { name: tmp, mountPath: /tmp }
+            # Optional cosign public key (GBMS_COSIGN_KEY=/keys/cosign.pub).
+            - { name: cosign-key, mountPath: /keys, readOnly: true }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - name: cosign-key
+          secret: { secretName: gaussia-brains-mcp-server-cosign, optional: true }

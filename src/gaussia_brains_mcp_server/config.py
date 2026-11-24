@@ -8,7 +8,11 @@ Nested values (the trusted issuer list) are given as JSON, e.g.::
 
     GBMS_AUTH_ISSUERS='[{"issuer": "https://idp.example.com/realms/acme",
                          "claims": {"roles": ["realm_access.roles"]},
-                         "role_scopes": {"brain-reader": ["brains:search", "brains:read"]}}]'
+                         "role_scopes": {"brain-reader": ["brains:read", "brains:catalog"],
+                                         "brain-editor": ["brains:write", "brains:publish"]}}]'
+
+The scopes this service authorizes on are ``brains:read``, ``brains:catalog``,
+``brains:write`` and ``brains:publish``.
 """
 
 from __future__ import annotations
@@ -243,7 +247,8 @@ class Settings(BaseSettings):
     # ── Search engines (shared by MCP and REST) ──────────────────────────
     #: OpenAI-compatible embeddings endpoint (``.../v1``; ``/embeddings`` is
     #: appended). Unset disables the vector index: search then runs on the
-    #: structural indices (hash map, B+ tree, inverted, graph, bitmap).
+    #: structural indices (hash map, B+ tree, inverted, graph). Core registers
+    #: no bitmap index either; ``BitmapIndex`` is ported but not registered.
     embeddings_url: str | None = None
     embeddings_model: str | None = None
     embeddings_api_key: SecretStr | None = None
@@ -253,6 +258,13 @@ class Settings(BaseSettings):
     embeddings_model_tag: str | None = None
     embeddings_timeout_seconds: float = Field(default=30.0, gt=0)
     embeddings_batch_size: int = Field(default=64, ge=1)
+    #: Retries after a transport error, 429 or 5xx (0 disables). Backoff is
+    #: exponential from ``embeddings_backoff_seconds`` with full jitter, capped
+    #: at ``embeddings_backoff_max_seconds``; a ``Retry-After`` is honoured up
+    #: to that cap.
+    embeddings_max_retries: int = Field(default=3, ge=0, le=10)
+    embeddings_backoff_seconds: float = Field(default=0.5, ge=0)
+    embeddings_backoff_max_seconds: float = Field(default=8.0, ge=0)
     #: Characters of a block's text that are indexed.
     index_max_chars: int = Field(default=1_000_000, ge=1)
     #: Characters of a block's named content read for search and display.
@@ -333,6 +345,30 @@ class Settings(BaseSettings):
                 "no brain could ever be trusted"
             )
         return self
+
+    def fatal_startup_problems(self) -> list[str]:
+        """Problems the service must refuse to start with.
+
+        Authentication on with no trusted issuer rejects every token, so the
+        service would be up and useless -- almost always an overlay that forgot
+        ``GBMS_AUTH_ISSUERS``. ``GBMS_ALLOW_INSECURE_DEV=true`` is the explicit
+        opt-out (it downgrades this to a warning). Not a model validator: a
+        bare ``Settings()`` is constructed throughout the code and tests.
+        """
+        problems: list[str] = []
+        if self.auth_enabled and not self.auth_issuers and not self.allow_insecure_dev:
+            problems.append(
+                "GBMS_AUTH_ENABLED=true with an empty GBMS_AUTH_ISSUERS: no token "
+                "could ever be accepted. Configure an issuer, or set "
+                "GBMS_ALLOW_INSECURE_DEV=true to start anyway"
+            )
+        return problems
+
+    def raise_for_startup(self) -> None:
+        """Raise ``ValueError`` when :meth:`fatal_startup_problems` finds any."""
+        problems = self.fatal_startup_problems()
+        if problems:
+            raise ValueError("; ".join(problems))
 
     def startup_problems(self) -> list[str]:
         """Configuration that is valid to construct but not to serve with."""

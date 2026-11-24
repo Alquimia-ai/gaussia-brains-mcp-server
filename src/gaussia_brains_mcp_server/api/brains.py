@@ -8,7 +8,17 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
-from gaussia_brains_mcp_server.auth.http import require_any_scope, require_scopes
+from gaussia_brains_mcp_server.api.lifecycle import (
+    ERRORS,
+    BrainStatus,
+    PublishedBrain,
+    error_response,
+)
+from gaussia_brains_mcp_server.auth.http import (
+    insufficient_scope,
+    require_any_scope,
+    require_scopes,
+)
 from gaussia_brains_mcp_server.auth.principal import Principal
 from gaussia_brains_mcp_server.auth.scopes import CATALOG, PUBLISH, READ, WRITE
 from gaussia_brains_mcp_server.catalog import catalog
@@ -161,7 +171,12 @@ async def brain_tags(
     return {"reference": expanded.split("@", 1)[0].rsplit(":", 1)[0], "tags": tags}
 
 
-@router.get("/{brain_ref:path}")
+@router.get(
+    "/{brain_ref:path}",
+    responses=ERRORS,
+    response_model=BrainStatus | PublishedBrain,
+    response_model_exclude_unset=True,
+)
 async def get_brain(
     request: Request,
     response: Response,
@@ -171,7 +186,7 @@ async def get_brain(
         str | None, Query(description="Branch to report (working-store brains)")
     ] = None,
     settings: Settings = Depends(get_settings),  # noqa: B008
-) -> dict[str, Any]:
+) -> Any:
     """Return detail for a single brain.
 
     A brain held in the working store reports its status: modules and block
@@ -181,7 +196,26 @@ async def get_brain(
 
     *brain_ref* may be a short reference such as ``brains/my-brain:latest`` or a
     full OCI reference such as ``registry.example.com/acme/handbook:main``.
+    Errors carry the lifecycle's stable ``code``.
     """
+    try:
+        return await _brain_detail(
+            request, response, brain_ref, principal, branch, settings
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - mapped to a stable code
+        return error_response(request, exc)
+
+
+async def _brain_detail(
+    request: Request,
+    response: Response,
+    brain_ref: str,
+    principal: Principal,
+    branch: str | None,
+    settings: Settings,
+) -> dict[str, Any]:
     service = getattr(request.app.state, "lifecycle", None)
     if service is not None and "@" not in brain_ref:
         try:
@@ -194,7 +228,7 @@ async def get_brain(
                 response.headers["ETag"] = f'"{status["head"]}"'
             return status
     if not principal.has_scope(CATALOG):
-        raise HTTPException(status_code=403, detail=f"Missing scopes: {[CATALOG]}")
+        raise insufficient_scope({CATALOG}, f"Missing scopes: {[CATALOG]}")
     cat = catalog(settings)
     expanded = settings.expand_brain_ref(brain_ref)
     return await cat.manifest_detail(

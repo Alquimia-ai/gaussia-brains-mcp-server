@@ -657,22 +657,36 @@ class VectorIndex(AbstractIndex, TravellingIndex):
         return dot / (norm_a * norm_b)
 
     def search(self, query: Any, limit: int = 10) -> list[tuple[BlockId, float]]:
+        return self.search_with_status(query, limit)[0]
+
+    def search_with_status(
+        self, query: Any, limit: int = 10
+    ) -> tuple[list[tuple[BlockId, float]], str | None]:
+        """``search``, plus why the index did not take part when it did not.
+
+        The reason is ``None`` when vectors were scored, otherwise one of
+        ``no_vectors``, ``not_text``, ``model_mismatch`` or
+        ``embedding_failed``. ``search`` swallows these -- the SDK's ``Index``
+        contract returns a list -- so the planner asks here to be able to
+        report that semantic search did not contribute. Returned rather than
+        stored on the index, which is shared by concurrent queries.
+        """
         if not self._vectors:
-            return []
+            return [], "no_vectors"
         if not isinstance(query, str):
-            return []
+            return [], "not_text"
         if not self._model_matches():
-            return []
+            return [], "model_mismatch"
         qvec_list = self._embed([query])
         if qvec_list is None or not qvec_list:
-            return []
+            return [], "embedding_failed"
         qvec = qvec_list[0]
         scores = {
             bid: self._cosine_similarity(qvec, vec)
             for bid, vec in self._vectors.items()
         }
         ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        return [(bid, float(_score_to_str(s))) for bid, s in ranked[:limit]]
+        return [(bid, float(_score_to_str(s))) for bid, s in ranked[:limit]], None
 
     def dump(self) -> bytes:
         """Versioned, stable dump format."""

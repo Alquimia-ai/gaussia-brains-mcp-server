@@ -182,3 +182,106 @@ def test_model_tag_defaults() -> None:
         == "baai/bge-m3"
     )
     assert Settings().effective_embeddings_model_tag() is None
+
+
+def _flaky(statuses: list[int], headers: dict[str, str] | None = None):
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        status = statuses[min(len(calls), len(statuses) - 1)]
+        calls.append(status)
+        if status != 200:
+            return httpx.Response(status, headers=headers or {})
+        n = len(json.loads(request.content)["input"])
+        return httpx.Response(
+            200, json={"data": [{"index": i, "embedding": [1.0]} for i in range(n)]}
+        )
+
+    return handler, calls
+
+
+def test_embeddings_retry_transient_failures_with_retry_after() -> None:
+    handler, calls = _flaky([429, 503, 200], headers={"Retry-After": "2"})
+    slept: list[float] = []
+    client = OpenAICompatibleEmbeddings(
+        "http://emb/v1",
+        "m",
+        model_tag="t",
+        transport=httpx.MockTransport(handler),
+        sleep=slept.append,
+    )
+    assert client.embed_documents(["x"]) == [[1.0]]
+    assert calls == [429, 503, 200]
+    assert slept == [2.0, 2.0]
+
+
+def test_embeddings_give_up_after_max_retries_and_skip_client_errors() -> None:
+    handler, calls = _flaky([500])
+    slept: list[float] = []
+    client = OpenAICompatibleEmbeddings(
+        "http://user:pw@emb/v1?key=secret",
+        "m",
+        model_tag="t",
+        max_retries=2,
+        backoff=0.1,
+        backoff_max=0.15,
+        transport=httpx.MockTransport(handler),
+        sleep=slept.append,
+    )
+    with pytest.raises(EmbeddingsError) as err:
+        client.embed_documents(["x"])
+    assert len(calls) == 3
+    assert all(0 <= s <= 0.15 for s in slept) and len(slept) == 2
+    assert "pw" not in str(err.value) and "secret" not in str(err.value)
+
+    handler, calls = _flaky([400])
+    client = OpenAICompatibleEmbeddings(
+        "http://emb/v1", "m", model_tag="t", transport=httpx.MockTransport(handler)
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        client.embed_documents(["x"])
+    assert calls == [400]
+
+
+def test_embeddings_retry_transport_errors() -> None:
+    attempts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        if len(attempts) < 2:
+            raise httpx.ConnectError("refused", request=request)
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": [2.0]}]})
+
+    client = OpenAICompatibleEmbeddings(
+        "http://emb/v1",
+        "m",
+        model_tag="t",
+        transport=httpx.MockTransport(handler),
+        sleep=lambda _s: None,
+    )
+    assert client.embed_documents(["x"]) == [[2.0]]
+
+
+def test_redact_url_and_cache_key() -> None:
+    from pydantic import SecretStr
+
+    from gaussia_brains_mcp_server.embeddings import get_embeddings, redact_url
+
+    assert redact_url("https://u:p@emb.example:8443/v1?api_key=s#f") == (
+        "https://emb.example:8443/v1"
+    )
+    base = {"embeddings_url": "http://emb/v1", "embeddings_model": "m"}
+    first = get_embeddings(Settings(**base, embeddings_api_key=SecretStr("a")))
+    assert get_embeddings(Settings(**base, embeddings_api_key=SecretStr("a"))) is first
+    assert (
+        get_embeddings(Settings(**base, embeddings_api_key=SecretStr("b"))) is not first
+    )
+    assert get_embeddings(Settings(**base, embeddings_max_retries=0)) is not first
+
+
+def test_auth_without_issuers_is_fatal_unless_insecure_dev() -> None:
+    assert Settings().fatal_startup_problems()
+    with pytest.raises(ValueError, match="GBMS_AUTH_ISSUERS"):
+        Settings().raise_for_startup()
+    Settings(allow_insecure_dev=True).raise_for_startup()
+    Settings(auth_enabled=False, allow_insecure_dev=True).raise_for_startup()

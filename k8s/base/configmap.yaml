@@ -18,8 +18,8 @@ data:
   # off | warn | required
   GBMS_SIGNATURE_POLICY: "off"
   GBMS_VERIFY_UNSIGNED: warn
-  # The working store (the PVC). Unset on read-only replicas.
-  GBMS_STORE_ROOT: /var/lib/gbms/brains
+  # GBMS_STORE_ROOT (the working store) is set on the writer Deployment only, not here: this
+  # ConfigMap is shared with the read replicas, which must run without it.
   # Writes are attributed to the token's human: this claim when it is an address, else
   # <GBMS_ACTOR_NAMESPACE or issuer host>/<sub>.
   GBMS_ACTOR_CLAIM: email
@@ -28,9 +28,14 @@ data:
   # GBMS_EMBEDDINGS_MODEL: text-embedding-3-small
   # GBMS_EMBEDDINGS_MODEL_TAG: openai/text-embedding-3-small
   # OAuth resource server: the audience tokens are issued for, and the issuers trusted.
+  # Writer and read replicas share one GBMS_AUTH_RESOURCE: they are one logical resource.
   GBMS_AUTH_ENABLED: "true"
   GBMS_AUTH_RESOURCE: http://gaussia-brains-mcp-server.brains.svc.cluster.local:8000
+  # REQUIRED IN AN OVERLAY. '[]' is a placeholder, not a working value: with auth enabled and no
+  # issuer every token is rejected, and the server refuses to start (Settings.raise_for_startup)
+  # unless GBMS_ALLOW_INSECURE_DEV=true. Set the issuer list, e.g.:
   # Keycloak (platform bundle): realm roles map to scopes. Ledger users need brain-writer.
+  #   GBMS_AUTH_ISSUERS: |
   #   [{"issuer": "https://sso.example.com/realms/alquimia",
   #     "claims": {"roles": ["realm_access.roles"]},
   #     "role_scopes": {"brain-reader":    ["brains:read"],

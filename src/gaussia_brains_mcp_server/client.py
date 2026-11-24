@@ -104,6 +104,11 @@ def validate_manifest_document(document: dict[str, Any], target: str) -> None:
             )
 
 
+def _copy_blob(store: BlockStore, digest: OciDigest, path: Path) -> None:
+    """Write the blob *digest* from *store* to *path* (runs in a worker thread)."""
+    path.write_bytes(store.get_bytes(digest))
+
+
 def is_digest(tag: str) -> bool:
     return tag.startswith("sha256:")
 
@@ -412,7 +417,7 @@ class GaussiaRegistryClient:
                 what=f"fetching blob {target}",
             )
             data = await asyncio.to_thread(out.read_bytes)
-        written = store.put_bytes(data)
+        written = await asyncio.to_thread(store.put_bytes, data)
         if written != digest:
             raise DistributionError(
                 f"blob digest mismatch pulling {digest} from {reference}: "
@@ -498,7 +503,9 @@ class GaussiaRegistryClient:
                 if job is not None:
                     job.checkpoint()
                 blob = tmpdir / descriptor.digest.hex
-                blob.write_bytes(store.get_bytes(descriptor.digest))
+                # Layers can be large and the store may be on a network
+                # volume: copy each one off the event loop.
+                await asyncio.to_thread(_copy_blob, store, descriptor.digest, blob)
                 await self._oras.run(
                     "blob",
                     "push",
@@ -507,7 +514,9 @@ class GaussiaRegistryClient:
                     what=f"pushing blob {descriptor.digest.short} to {reference}",
                 )
             manifest_file = tmpdir / "manifest.json"
-            manifest_file.write_bytes(manifest.to_bytes())
+            await asyncio.to_thread(manifest_file.write_bytes, manifest.to_bytes())
+            # Synchronous and immediately before the manifest push: nothing
+            # may await between the point of no return and the write.
             if job is not None:
                 job.commit_point(f"writing manifest {target}")
             await self._oras.run(

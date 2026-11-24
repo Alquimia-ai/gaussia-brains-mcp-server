@@ -8,31 +8,37 @@ answer ``202`` with a job (``GET /v1/jobs/{id}``).
 Errors carry a stable ``code`` (see :mod:`gaussia_brains_mcp_server.lifecycle.errors`)::
 
     {"code": "not_fast_forward", "message": "...", "detail": {...}}
+
+A request that does not parse is ``usage`` (400) with ``detail.errors``; one
+whose body is larger than the service accepts is ``usage`` with 413. Uploads
+are read only after the caller is authenticated, and never past the limit.
 """
 
 from __future__ import annotations
 
 import asyncio
 import tempfile
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import (
     APIRouter,
     Depends,
-    File,
-    Form,
     Header,
     HTTPException,
     Query,
     Request,
     Response,
-    UploadFile,
 )
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ValidationError as PydanticValidationError
+from starlette.datastructures import FormData, UploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
 
 from gaussia_brains_mcp_server.auth.http import require_any_scope, require_scopes
 from gaussia_brains_mcp_server.auth.principal import Principal
@@ -53,8 +59,41 @@ from gaussia_brains_mcp_server.lifecycle.service import (
 )
 
 
+def invalid_request(errors: Sequence[Any]) -> LifecycleError:
+    """``usage`` for a request that does not parse, with every error in detail."""
+    encoded = jsonable_encoder(list(errors))
+    summary = "; ".join(
+        f"{'.'.join(str(p) for p in e.get('loc', ()))}: {e.get('msg', '')}"
+        for e in encoded[:3]
+        if isinstance(e, dict)
+    )
+    return LifecycleError(
+        USAGE,
+        f"invalid request: {summary}" if summary else "invalid request",
+        detail={"errors": encoded},
+    )
+
+
+def error_response(request: Request, exc: Exception) -> JSONResponse:
+    """The stable error body for *exc* (anything unknown is ``internal``)."""
+    if isinstance(exc, RequestValidationError):
+        exc = invalid_request(exc.errors())
+    info = describe(exc)
+    if info.code == "internal":
+        from loguru import logger
+
+        logger.opt(exception=exc).error(
+            "{} {} failed", request.method, request.url.path
+        )
+    return JSONResponse(status_code=info.status, content=info.body())
+
+
 class LifecycleRoute(APIRoute):
-    """Turns any error raised by a lifecycle handler into its stable error body."""
+    """Turns any error raised by a lifecycle handler into its stable error body.
+
+    Authentication and scope failures (:class:`HTTPException`) pass through
+    to the application's handler, which renders them in the same contract.
+    """
 
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
         handler = super().get_route_handler()
@@ -65,12 +104,7 @@ class LifecycleRoute(APIRoute):
             except HTTPException:
                 raise
             except Exception as exc:  # noqa: BLE001 - mapped to a stable code
-                info = describe(exc)
-                if info.code == "internal":
-                    from loguru import logger
-
-                    logger.exception("{} {} failed", request.method, request.url.path)
-                return JSONResponse(status_code=info.status, content=info.body())
+                return error_response(request, exc)
 
         return route
 
@@ -104,8 +138,47 @@ class ErrorBody(BaseModel):
 
 
 ERRORS: dict[int | str, dict[str, Any]] = {
-    status: {"model": ErrorBody} for status in (400, 403, 404, 409, 422, 502)
+    status: {"model": ErrorBody} for status in (400, 401, 403, 404, 409, 422, 500, 502)
 }
+UPLOAD_ERRORS: dict[int | str, dict[str, Any]] = {
+    **ERRORS,
+    413: {"model": ErrorBody, "description": "The body is larger than accepted."},
+}
+
+#: Path segments the routes below use after ``{brain_ref:path}``. A brain or
+#: branch named with one of them would be shadowed by (or shadow) a route, so
+#: they are refused when the brain or branch is created.
+RESERVED_SEGMENTS = frozenset(
+    {
+        "history",
+        "blocks",
+        "modules",
+        "convergence",
+        "branches",
+        "search",
+        "evidence",
+        "commits",
+        "pull",
+        "push",
+        "converge",
+        "import",
+        "resolutions",
+        "accept-removals",
+        "continue",
+        "abort",
+        # the discovery routes (api/brains.py)
+        "tags",
+        "publish",
+        "unpublish",
+        "manifest",
+        "reindex",
+    }
+)
+
+#: Slack for multipart framing and the small form fields around an upload.
+FORM_OVERHEAD_BYTES = 1024 * 1024
+#: The largest JSON body the import route reads (it is a handful of strings).
+MAX_JSON_BODY_BYTES = 1024 * 1024
 
 
 class JobView(BaseModel):
@@ -238,6 +311,247 @@ class ReasonRequest(BaseModel):
     reason: str | None = None
 
 
+class _Open(BaseModel):
+    """A response object that may carry more fields than it documents."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+class ModuleSummary(_Open):
+    block_count: int
+    root: str
+
+
+class BranchView(_Open):
+    name: str
+    tag: str | None = None
+    snapshot: str | None = None
+    current: bool = False
+    published: str | None = None
+    unpublished: bool = False
+
+
+class RemoteBranchView(_Open):
+    name: str
+    tag: str
+    local: bool
+
+
+class BranchList(_Open):
+    branches: list[BranchView]
+    remote: list[RemoteBranchView] | None = Field(
+        default=None, description="Present with `remote=true`."
+    )
+
+
+class OpenConvergence(_Open):
+    open: bool
+    theirs: str | None = None
+    strategy: str | None = None
+    reason: str | None = None
+    actor: str | None = None
+    head: str | None = None
+    branch: str | None = None
+    resolutions: int | None = None
+
+
+class Publication(_Open):
+    reference: str
+    tag: str | None = None
+    snapshot: str
+    up_to_date: bool
+
+
+class BrainStatus(_Open):
+    """A brain held in the working store, at one branch."""
+
+    reference: str
+    held: bool
+    title: str = ""
+    description: str = ""
+    default_tag: str
+    created_at: str | None = None
+    created_by: str | None = None
+    imported_from: str | None = None
+    governed: bool
+    read_only: bool
+    branch: str
+    head: str | None = None
+    current_branch: str | None = None
+    modules: dict[str, ModuleSummary] = Field(default_factory=dict)
+    block_count: int = 0
+    branches: list[BranchView] = Field(default_factory=list)
+    convergence: OpenConvergence | None = None
+    publication: Publication | None = None
+    mcp: dict[str, Any] = Field(default_factory=dict)
+
+
+class PublishedBrain(_Open):
+    """A brain read from the registry: its published manifest."""
+
+    reference: str
+    tag: str | None = None
+    digest: str | None = None
+    modules: list[str] = Field(default_factory=list)
+    annotations: dict[str, Any] | None = None
+    signature: dict[str, Any] | None = None
+    mcp: dict[str, Any] | None = None
+
+
+class BlockRow(_Open):
+    block_id: str
+    memory_type: str
+    added_at: str | None = None
+    superseded_by: str | None = None
+    demoted: bool = False
+    tombstoned: bool = False
+    readable: bool = True
+    unreadable_reason: str | None = Field(
+        default=None, description="Present when the block could not be read."
+    )
+    summary: str | None = None
+    payload: Any = None
+
+
+class BlockPage(_Open):
+    memory_type: str
+    snapshot: str
+    total: int
+    blocks: list[BlockRow]
+    next_cursor: str | None = None
+
+
+class BlockDetail(BlockRow):
+    snapshot: str
+    root: str
+    verifies: dict[str, bool]
+    text: Any = None
+    resolvable: bool | None = None
+    provenance: list[Any] = Field(default_factory=list)
+    supersedes: list[str] = Field(default_factory=list)
+    competing_successors: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    dependents: list[str] = Field(default_factory=list)
+    producer: Any = None
+    assisted_by: list[Any] = Field(default_factory=list)
+    validation: Any = None
+    locator: Any = None
+    removed: bool = False
+
+
+class SnapshotRow(_Open):
+    snapshot: str
+    pruned: bool | None = Field(
+        default=None, description="The snapshot is no longer held; the chain ends."
+    )
+    created_at: str | None = None
+    parents: list[str] | None = None
+    reconciliation: bool | None = None
+    labels: dict[str, Any] | None = None
+    governed: bool | None = None
+    modules: dict[str, ModuleSummary] | None = None
+    published: bool | None = None
+
+
+class HistoryPage(_Open):
+    branch: str
+    head: str | None = None
+    snapshots: list[SnapshotRow]
+    next_cursor: str | None = None
+
+
+class SearchSource(_Open):
+    block_id: str
+    locator: Any = None
+
+
+class SearchMatch(_Open):
+    block_id: str
+    memory_type: str
+    content: Any = None
+    score: float | None = None
+    sources: list[SearchSource] = Field(default_factory=list)
+    locator: Any = None
+    resolvable: bool | None = None
+    verified: bool | None = None
+
+
+class SearchNarrowing(_Open):
+    requested_memory_types: list[str] | None = None
+    searched_memory_types: list[str] = Field(default_factory=list)
+    missing_memory_types: list[str] = Field(default_factory=list)
+    semantic: Any = None
+    semantic_reason: str | None = Field(
+        default=None,
+        description=(
+            "Why vector search did not score the query (null when it did): "
+            "not_routed, no_vector_index, no_vectors, model_mismatch, "
+            "embedding_failed, not_text, unavailable."
+        ),
+    )
+    indices_used: list[str] | None = Field(
+        default=None, description="Index kinds that returned candidates."
+    )
+    dropped_unverified: int = 0
+
+
+class SearchResponse(_Open):
+    results: list[SearchMatch]
+    truncated: bool
+    verified_against: dict[str, str] = Field(default_factory=dict)
+    narrowing: SearchNarrowing
+    snapshot: str | None = Field(default=None, description="Working-store brains.")
+    branch: str | None = Field(default=None, description="Working-store brains.")
+    reference: str | None = Field(default=None, description="Registry brains.")
+
+
+class CandidateVerdict(_Open):
+    index: int
+    status: str = Field(description="`accepted`, `rejected`, ...")
+    memory_type: str
+    block_id: str | None = None
+    issues: list[Any] = Field(default_factory=list)
+    conflicts_with: list[str] = Field(default_factory=list)
+    candidate: Any = None
+
+
+class ValidationReport(_Open):
+    clean: bool
+    committable: int
+    results: list[CandidateVerdict]
+    producer: Any = None
+    task_id: str | None = None
+    checks: list[Any] = Field(default_factory=list)
+
+
+class CommittedBlock(_Open):
+    block_id: str
+    memory_type: str
+    payload: Any = None
+
+
+class CommitResponse(_Open):
+    """A dry run (``report`` with every verdict, rejected ones included) or a commit."""
+
+    dry_run: bool
+    report: ValidationReport
+    head: str | None = None
+    committed: list[CommittedBlock] | None = None
+    provenance: list[str] | None = None
+    snapshot: str | None = None
+    roots: dict[str, str] | None = None
+    branch: str | None = None
+
+
+class ConvergenceView(_Open):
+    open: bool
+    branch: str | None = None
+    resolved: bool | None = None
+    unresolved: list[str] | None = None
+    removals_accepted: bool | None = None
+    status: Any = None
+
+
 class ImportRequest(BaseModel):
     source: str | None = Field(
         default=None,
@@ -274,12 +588,84 @@ def _job_response(job: Job) -> JSONResponse:
     )
 
 
+def check_brain_name(reference: str) -> None:
+    """Refuse a new brain whose path would collide with a route (``usage``)."""
+    path = reference.split("@", 1)[0]
+    segments = path.split("/")
+    segments[-1] = segments[-1].split(":", 1)[0]
+    clashes = sorted({seg for seg in segments if seg.lower() in RESERVED_SEGMENTS})
+    if clashes:
+        raise LifecycleError(
+            USAGE,
+            f"a brain cannot be named with the segment(s) {clashes}: they are "
+            f"reserved by the REST routes",
+            detail={"reserved": clashes},
+        )
+
+
+def check_branch_name(name: str) -> None:
+    """Refuse a branch name the branch routes could not address (``usage``)."""
+    segments = name.split("/")
+    if "branches" in segments or segments[-1] == "push":
+        raise LifecycleError(
+            USAGE,
+            "a branch name cannot contain a `branches` segment or end in `push`: "
+            "the branch routes could not address it",
+        )
+
+
+def _too_large(limit: int) -> LifecycleError:
+    return LifecycleError(
+        USAGE,
+        f"the request body is larger than {limit} bytes",
+        detail={"limit": limit},
+        status=413,
+    )
+
+
+async def _limited_stream(request: Request, limit: int) -> AsyncGenerator[bytes, None]:
+    """The request body, refused (413) as soon as it passes *limit* bytes."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise _too_large(limit)
+    seen = 0
+    async for chunk in request.stream():
+        seen += len(chunk)
+        if seen > limit:
+            raise _too_large(limit)
+        yield chunk
+
+
+async def _read_form(request: Request, limit: int) -> FormData:
+    """Parse a multipart body, reading at most *limit* bytes of it."""
+    content_type = request.headers.get("content-type", "")
+    if not content_type.startswith("multipart/form-data"):
+        raise LifecycleError(USAGE, "the body must be multipart/form-data")
+    parser = MultiPartParser(
+        request.headers, _limited_stream(request, limit), max_files=4, max_fields=16
+    )
+    try:
+        return await parser.parse()
+    except MultiPartException as exc:
+        raise LifecycleError(USAGE, f"invalid multipart body: {exc.message}") from exc
+
+
+async def _read_body(request: Request, limit: int) -> bytes:
+    return b"".join([chunk async for chunk in _limited_stream(request, limit)])
+
+
 # --------------------------------------------------------------------------- #
 # Create, status, browse
 # --------------------------------------------------------------------------- #
 
 
-@router.post("", status_code=201, responses=ERRORS)
+@router.post(
+    "",
+    status_code=201,
+    responses=ERRORS,
+    response_model=BrainStatus,
+    response_model_exclude_unset=True,
+)
 async def create_brain(
     body: CreateBrainRequest,
     principal: WritePrincipal,
@@ -289,8 +675,11 @@ async def create_brain(
 ) -> dict[str, Any]:
     """Create an empty, ungoverned brain in the working store.
 
-    Its first evidence or commit creates its history.
+    Its first evidence or commit creates its history. A reference with a path
+    segment the routes use (``history``, ``blocks``, ``branches``, ...) is
+    refused with ``usage``.
     """
+    check_brain_name(body.reference)
     status = service.create(
         body.reference,
         actor=actor_for(principal, settings),
@@ -302,7 +691,12 @@ async def create_brain(
     return status
 
 
-@router.get("/{brain_ref:path}/modules/{memory_type}/blocks", responses=ERRORS)
+@router.get(
+    "/{brain_ref:path}/modules/{memory_type}/blocks",
+    responses=ERRORS,
+    response_model=BlockPage,
+    response_model_exclude_unset=True,
+)
 async def list_blocks(
     brain_ref: str,
     memory_type: str,
@@ -324,7 +718,12 @@ async def list_blocks(
     )
 
 
-@router.get("/{brain_ref:path}/blocks/{block_id}", responses=ERRORS)
+@router.get(
+    "/{brain_ref:path}/blocks/{block_id}",
+    responses=ERRORS,
+    response_model=BlockDetail,
+    response_model_exclude_unset=True,
+)
 async def get_block(
     brain_ref: str,
     block_id: str,
@@ -339,7 +738,12 @@ async def get_block(
     )
 
 
-@router.get("/{brain_ref:path}/history", responses=ERRORS)
+@router.get(
+    "/{brain_ref:path}/history",
+    responses=ERRORS,
+    response_model=HistoryPage,
+    response_model_exclude_unset=True,
+)
 async def get_history(
     brain_ref: str,
     principal: ReadPrincipal,
@@ -355,7 +759,12 @@ async def get_history(
     )
 
 
-@router.post("/{brain_ref:path}/search", responses=ERRORS)
+@router.post(
+    "/{brain_ref:path}/search",
+    responses=ERRORS,
+    response_model=SearchResponse,
+    response_model_exclude_unset=True,
+)
 async def search(
     brain_ref: str,
     body: SearchRequest,
@@ -395,38 +804,80 @@ async def search(
 # --------------------------------------------------------------------------- #
 
 
-@router.post("/{brain_ref:path}/evidence", status_code=201, responses=ERRORS)
+_EVIDENCE_FORM = {
+    "type": "object",
+    "required": ["file"],
+    "properties": {
+        "file": {
+            "type": "string",
+            "format": "binary",
+            "description": "The source, byte for byte.",
+        },
+        "media_type": {"type": "string"},
+        "origin": {"type": "string"},
+        "license": {"type": "string"},
+        "branch": {"type": "string"},
+    },
+}
+
+
+@router.post(
+    "/{brain_ref:path}/evidence",
+    status_code=201,
+    responses=UPLOAD_ERRORS,
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"multipart/form-data": {"schema": _EVIDENCE_FORM}},
+        }
+    },
+)
 async def register_evidence(
     brain_ref: str,
+    request: Request,
     principal: WritePrincipal,
     service: Service,
-    file: Annotated[UploadFile, File(description="The source, byte for byte.")],
-    media_type: Annotated[str | None, Form()] = None,
-    origin: Annotated[str | None, Form()] = None,
-    license: Annotated[str | None, Form()] = None,
-    branch: Annotated[str | None, Form()] = None,
     if_match: IfMatch = None,
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> dict[str, Any]:
-    """Register a source as canonical evidence (multipart). Identical bytes are a no-op."""
+    """Register a source as canonical evidence (multipart). Identical bytes are a no-op.
+
+    A source larger than ``GBMS_STORE_MAX_EVIDENCE_BYTES`` is ``usage`` (413).
+    """
+    # The form is read here, after the caller is authenticated, and never past
+    # the limit; declaring it as File/Form parameters would spool it first.
     limit = settings.store_max_evidence_bytes
-    data = await file.read(limit + 1)
-    if len(data) > limit:
-        raise LifecycleError(USAGE, f"the evidence is larger than {limit} bytes")
-    handle = service.handle(brain_ref)
-    return await service.register_evidence(
-        handle,
-        data,
-        actor=actor_for(principal, settings),
-        media_type=media_type or file.content_type or "application/octet-stream",
-        origin=origin,
-        license=license,
-        branch=branch,
-        if_match=if_match,
-    )
+    form = await _read_form(request, limit + FORM_OVERHEAD_BYTES)
+    try:
+        file = form.get("file")
+        if not isinstance(file, UploadFile):
+            raise LifecycleError(USAGE, "the form needs a `file` part")
+        data = await file.read(limit + 1)
+        if len(data) > limit:
+            raise _too_large(limit)
+        handle = service.handle(brain_ref)
+        return await service.register_evidence(
+            handle,
+            data,
+            actor=actor_for(principal, settings),
+            media_type=_form_str(form.get("media_type"))
+            or file.content_type
+            or "application/octet-stream",
+            origin=_form_str(form.get("origin")),
+            license=_form_str(form.get("license")),
+            branch=_form_str(form.get("branch")),
+            if_match=if_match,
+        )
+    finally:
+        await form.close()
 
 
-@router.post("/{brain_ref:path}/commits", responses=ERRORS)
+@router.post(
+    "/{brain_ref:path}/commits",
+    responses=ERRORS,
+    response_model=CommitResponse,
+    response_model_exclude_unset=True,
+)
 async def commit(
     brain_ref: str,
     body: CommitRequest,
@@ -470,7 +921,12 @@ async def commit(
 # --------------------------------------------------------------------------- #
 
 
-@router.get("/{brain_ref:path}/branches", responses=ERRORS)
+@router.get(
+    "/{brain_ref:path}/branches",
+    responses=ERRORS,
+    response_model=BranchList,
+    response_model_exclude_unset=True,
+)
 async def list_branches(
     brain_ref: str,
     principal: ReadPrincipal,
@@ -492,6 +948,7 @@ async def push_branch(
     principal: WritePrincipal,
     service: Service,
     body: PushRequest | None = None,
+    if_match: IfMatch = None,
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> JSONResponse:
     """Push a branch to its tag (main → the default tag, others → `br.<name>`).
@@ -504,6 +961,7 @@ async def push_branch(
         name,
         actor=actor_for(principal, settings),
         force=bool(body and body.force),
+        if_match=if_match,
     )
     return _job_response(job)
 
@@ -514,11 +972,18 @@ async def create_branch(
     body: CreateBranchRequest,
     principal: WritePrincipal,
     service: Service,
+    if_match: IfMatch = None,
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> dict[str, Any]:
+    """Create a branch; a name with a `branches` segment or ending in `push` is ``usage``."""
+    check_branch_name(body.name)
     handle = service.handle(brain_ref)
     return await service.create_branch(
-        handle, body.name, actor=actor_for(principal, settings), start=body.start
+        handle,
+        body.name,
+        actor=actor_for(principal, settings),
+        start=body.start,
+        if_match=if_match,
     )
 
 
@@ -529,12 +994,17 @@ async def delete_branch(
     principal: WritePrincipal,
     service: Service,
     force: Annotated[bool, Query()] = False,
+    if_match: IfMatch = None,
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> dict[str, Any]:
     """Delete a branch's local ref; its registry tag stays."""
     handle = service.handle(brain_ref)
     return await service.delete_branch(
-        handle, name, actor=actor_for(principal, settings), force=force
+        handle,
+        name,
+        actor=actor_for(principal, settings),
+        force=force,
+        if_match=if_match,
     )
 
 
@@ -544,6 +1014,7 @@ async def pull(
     principal: WritePrincipal,
     service: Service,
     body: PullRequest | None = None,
+    if_match: IfMatch = None,
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> JSONResponse:
     handle = service.handle(brain_ref)
@@ -552,6 +1023,7 @@ async def pull(
         actor=actor_for(principal, settings),
         tag=body.tag if body else None,
         branch=body.branch if body else None,
+        if_match=if_match,
     )
     return _job_response(job)
 
@@ -567,6 +1039,7 @@ async def converge(
     body: ConvergeRequest,
     principal: WritePrincipal,
     service: Service,
+    if_match: IfMatch = None,
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> JSONResponse:
     """Bring another branch or published tag into a branch (job).
@@ -583,11 +1056,17 @@ async def converge(
         strategy=body.strategy,
         reason=body.reason,
         fast_forward=body.fast_forward,
+        if_match=if_match,
     )
     return _job_response(job)
 
 
-@router.get("/{brain_ref:path}/convergence", responses=ERRORS)
+@router.get(
+    "/{brain_ref:path}/convergence",
+    responses=ERRORS,
+    response_model=ConvergenceView,
+    response_model_exclude_unset=True,
+)
 async def get_convergence(
     brain_ref: str, principal: ReadPrincipal, service: Service
 ) -> dict[str, Any]:
@@ -601,6 +1080,7 @@ async def resolve(
     body: ResolutionRequest,
     principal: WritePrincipal,
     service: Service,
+    if_match: IfMatch = None,
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> dict[str, Any]:
     """Answer one open question: admit, reject, or prefer a successor."""
@@ -612,6 +1092,7 @@ async def resolve(
         kind=body.kind,
         prefer=body.prefer,
         reason=body.reason,
+        if_match=if_match,
     )
 
 
@@ -621,6 +1102,7 @@ async def accept_removals(
     principal: WritePrincipal,
     service: Service,
     body: ReasonRequest | None = None,
+    if_match: IfMatch = None,
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> dict[str, Any]:
     handle = service.handle(brain_ref)
@@ -628,6 +1110,7 @@ async def accept_removals(
         handle,
         actor=actor_for(principal, settings),
         reason=body.reason if body else None,
+        if_match=if_match,
     )
 
 
@@ -636,12 +1119,13 @@ async def continue_convergence(
     brain_ref: str,
     principal: WritePrincipal,
     service: Service,
+    if_match: IfMatch = None,
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> dict[str, Any]:
     """Conclude a convergence whose questions are answered (``needs_human`` if not)."""
     handle = service.handle(brain_ref)
     return await service.continue_convergence(
-        handle, actor=actor_for(principal, settings)
+        handle, actor=actor_for(principal, settings), if_match=if_match
     )
 
 
@@ -650,10 +1134,13 @@ async def abort_convergence(
     brain_ref: str,
     principal: WritePrincipal,
     service: Service,
+    if_match: IfMatch = None,
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> dict[str, Any]:
     handle = service.handle(brain_ref)
-    return await service.abort_convergence(handle, actor=actor_for(principal, settings))
+    return await service.abort_convergence(
+        handle, actor=actor_for(principal, settings), if_match=if_match
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -664,7 +1151,7 @@ async def abort_convergence(
 @router.post(
     "/{brain_ref:path}/import",
     status_code=202,
-    responses=ERRORS,
+    responses=UPLOAD_ERRORS,
     openapi_extra={
         "requestBody": {
             "required": False,
@@ -702,27 +1189,37 @@ async def import_brain(
     ``application/json`` (:class:`ImportRequest`) imports from the registry;
     ``multipart/form-data`` with a ``layout`` file (a ``.tar``/``.tar.gz`` of a
     brain's OCI layout) imports an upload. Governed brains are imported as they
-    are and served read-only.
+    are and served read-only. An upload larger than ``GBMS_STORE_MAX_IMPORT_BYTES``
+    is ``usage`` (413); a new brain named with a reserved segment is ``usage``.
     """
     actor = actor_for(principal, settings)
+    if service.held(brain_ref) is None:
+        check_brain_name(brain_ref)
     content_type = request.headers.get("content-type", "")
     if content_type.startswith("multipart/form-data"):
-        form = await request.form()
-        upload = form.get("layout")
-        if upload is None or isinstance(upload, str):
-            raise LifecycleError(USAGE, "the form needs a `layout` file")
-        archive = await _spool(upload, settings, service)
-        job = service.import_layout(
-            brain_ref,
-            archive,
-            actor=actor,
-            default_tag=_form_str(form.get("default_tag")),
-            title=_form_str(form.get("title")) or "",
-            description=_form_str(form.get("description")) or "",
-        )
+        limit = settings.store_max_import_bytes
+        form = await _read_form(request, limit + FORM_OVERHEAD_BYTES)
+        try:
+            upload = form.get("layout")
+            if not isinstance(upload, UploadFile):
+                raise LifecycleError(USAGE, "the form needs a `layout` file")
+            archive = await _spool(upload, settings, service)
+            job = service.import_layout(
+                brain_ref,
+                archive,
+                actor=actor,
+                default_tag=_form_str(form.get("default_tag")),
+                title=_form_str(form.get("title")) or "",
+                description=_form_str(form.get("description")) or "",
+            )
+        finally:
+            await form.close()
         return _job_response(job)
-    raw = await request.body()
-    body = ImportRequest.model_validate_json(raw or b"{}")
+    raw = await _read_body(request, MAX_JSON_BODY_BYTES)
+    try:
+        body = ImportRequest.model_validate_json(raw or b"{}")
+    except PydanticValidationError as exc:
+        raise invalid_request(exc.errors()) from exc
     job = service.import_from_registry(
         brain_ref,
         actor=actor,
@@ -749,9 +1246,7 @@ async def _spool(upload: Any, settings: Settings, service: LifecycleService) -> 
             while chunk := await upload.read(1024 * 1024):
                 written += len(chunk)
                 if written > limit:
-                    raise LifecycleError(
-                        USAGE, f"the upload is larger than {limit} bytes"
-                    )
+                    raise _too_large(limit)
                 out.write(chunk)
     except BaseException:
         Path(path).unlink(missing_ok=True)
