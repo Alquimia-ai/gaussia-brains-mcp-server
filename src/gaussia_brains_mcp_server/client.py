@@ -1,9 +1,10 @@
 """OCI registry client for Boltzmann Brain artifacts.
 
-Implements the subset of pyboltzmann's ``RegistryClient`` protocol the read
-path uses -- ``resolve``, ``list_tags``, ``pull_blob``, ``referrers`` -- plus
-the namespace-index writes needed to publish, unpublish and reindex brains,
-all by shelling out to the ``oras`` CLI. Snapshot authorship is judged by
+Implements pyboltzmann's ``RegistryClient`` protocol -- ``resolve``,
+``list_tags``, ``pull_blob``, ``referrers`` for reads; ``push``,
+``push_referrer``, ``pull_referrer`` for the working store's distribution --
+plus the namespace-index writes needed to publish, unpublish and reindex
+brains, all by shelling out to the ``oras`` CLI with server-held credentials. Snapshot authorship is judged by
 pyboltzmann (``Brain.authenticate`` / ``Brain.pull``); publisher signatures
 (cosign) are an independent, optional gate applied at manifest resolution.
 """
@@ -464,6 +465,114 @@ class GaussiaRegistryClient:
             except ValueError:
                 logger.warning("Skipping an unreadable referrer of {}", target)
         return found
+
+    # -- Publishing (the write path) ----------------------------------------- #
+
+    async def push(
+        self,
+        reference: str,
+        tag: str,
+        manifest: BrainManifest,
+        store: BlockStore,
+    ) -> OciDigest:
+        """Publish an already-packed artifact: every blob, then the manifest.
+
+        The fast-forward check lives in ``Brain.push`` and is not repeated
+        here. Inside a job, the manifest write is the point of no return: a
+        cancel is honoured up to the last blob and refused from then on.
+        """
+        from gaussia_brains_mcp_server.lifecycle.jobs import current_job
+
+        target = reference_target(reference, tag)
+        descriptors = [manifest.config, *manifest.layers]
+        for descriptor in descriptors:
+            if descriptor.media_type not in BOLTZMANN_LAYER_MEDIA_TYPES:
+                raise DistributionError(
+                    f"refusing to push a layer of media type {descriptor.media_type!r}: "
+                    f"not part of the brain profile"
+                )
+        job = current_job()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            for descriptor in descriptors:
+                if job is not None:
+                    job.checkpoint()
+                blob = tmpdir / descriptor.digest.hex
+                blob.write_bytes(store.get_bytes(descriptor.digest))
+                await self._oras.run(
+                    "blob",
+                    "push",
+                    f"{reference}@{descriptor.digest}",
+                    str(blob),
+                    what=f"pushing blob {descriptor.digest.short} to {reference}",
+                )
+            manifest_file = tmpdir / "manifest.json"
+            manifest_file.write_bytes(manifest.to_bytes())
+            if job is not None:
+                job.commit_point(f"writing manifest {target}")
+            await self._oras.run(
+                "manifest",
+                "push",
+                target,
+                str(manifest_file),
+                "--media-type",
+                manifest.media_type,
+                what=f"pushing manifest {target}",
+            )
+        return manifest.digest
+
+    async def push_referrer(
+        self, reference: str, manifest: Any, store: BlockStore
+    ) -> OciDigest:
+        """Publish a signature manifest referring to a brain already pushed.
+
+        Brains created here are ungoverned and carry no signatures; this is
+        what lets an imported governed brain keep its signatures on a push.
+        """
+        from boltzmann.distribution.media_types import (
+            EMPTY_CONFIG_BYTES,
+            MANIFEST_MEDIA_TYPE,
+        )
+
+        payload = manifest.to_bytes()
+        digest = OciDigest.of(payload)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            for descriptor, data in (
+                (manifest.config, EMPTY_CONFIG_BYTES),
+                (manifest.record, store.get_bytes(manifest.record.digest)),
+            ):
+                blob = tmpdir / descriptor.digest.hex
+                blob.write_bytes(data)
+                await self._oras.run(
+                    "blob",
+                    "push",
+                    f"{reference}@{descriptor.digest}",
+                    str(blob),
+                    what=f"pushing signature blob {descriptor.digest.short}",
+                )
+            manifest_file = tmpdir / "signature.json"
+            manifest_file.write_bytes(payload)
+            await self._oras.run(
+                "manifest",
+                "push",
+                f"{reference}@{digest}",
+                str(manifest_file),
+                "--media-type",
+                MANIFEST_MEDIA_TYPE,
+                what=f"pushing signature manifest {digest.short}",
+            )
+        return digest
+
+    async def pull_referrer(self, reference: str, digest: OciDigest) -> Any:
+        """Fetch one signature manifest by digest."""
+        from boltzmann.distribution.manifest import parse_signature_manifest
+
+        target = f"{reference}@{digest}"
+        raw = await self._oras.run_bytes(
+            "manifest", "fetch", target, what=f"fetching {target}"
+        )
+        return parse_signature_manifest(raw)
 
     # -- Namespace index management ------------------------------------------ #
 

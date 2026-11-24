@@ -1,5 +1,7 @@
-# Ingress from the runtime (MCP) and Studio (catalog), nothing else. Adjust the selectors to the
-# namespaces they run in. Egress is left open: oras must reach the OCI registry and the issuer's JWKS.
+# Ingress from the runtime (MCP), Studio (catalog) and Ledger (lifecycle REST), nothing else.
+# Adjust the selectors to the namespaces they run in; if Ledger reaches the service through an
+# ingress controller, allow that namespace too. Egress is left open: oras must reach the OCI
+# registry, and the issuer's JWKS and the embeddings endpoint must be reachable.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

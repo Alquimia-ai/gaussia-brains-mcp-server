@@ -3,7 +3,12 @@ kind: Deployment
 metadata:
   name: gaussia-brains-mcp-server
 spec:
+  # The writer replica: it owns the working-store volume (ReadWriteOnce), so exactly one runs
+  # and an update replaces it rather than rolling a second one in beside it. Scale reads with a
+  # separate Deployment that leaves GBMS_STORE_ROOT unset (MCP, discovery and search only).
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: gaussia-brains-mcp-server
@@ -27,7 +32,8 @@ spec:
             - { name: http, containerPort: 8000 }
           envFrom:
             - configMapRef: { name: gaussia-brains-mcp-server }
-            # Optional: GBMS_REGISTRY_USERNAME / GBMS_REGISTRY_PASSWORD / GBMS_COSIGN_KEY.
+            # Optional: GBMS_REGISTRY_USERNAME / GBMS_REGISTRY_PASSWORD (push rights: this
+            # replica publishes brains) / GBMS_EMBEDDINGS_API_KEY / GBMS_COSIGN_KEY.
             - secretRef: { name: gaussia-brains-mcp-server, optional: true }
           env:
             - { name: HOME, value: /tmp }
@@ -39,9 +45,10 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 20
           resources:
-            # Roughly 8 KiB of heap per block, times GBMS_CACHE_MAX_BRAINS loaded brains.
-            requests: { cpu: 250m, memory: 512Mi }
-            limits: { memory: 2Gi }
+            # Roughly 8 KiB of heap per block, times GBMS_CACHE_MAX_BRAINS loaded brains, plus
+            # GBMS_STORE_MAX_READ_HANDLES open handles per working-store brain being browsed.
+            requests: { cpu: 500m, memory: 1Gi }
+            limits: { memory: 4Gi }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -49,5 +56,9 @@ spec:
           volumeMounts:
             # oras pulls into temporary directories.
             - { name: tmp, mountPath: /tmp }
+            # The working store (GBMS_STORE_ROOT=/var/lib/gbms/brains).
+            - { name: store, mountPath: /var/lib/gbms }
       volumes:
         - { name: tmp, emptyDir: {} }
+        - name: store
+          persistentVolumeClaim: { claimName: gaussia-brains-mcp-server-store }

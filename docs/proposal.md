@@ -1,15 +1,15 @@
 # Proposal: Gaussia Brains MCP Server
 
-**Epic goal:** Serve Boltzmann Brains to agents as **headless, signed, MCP-served knowledge**.
-- Someone publishes a brain to an OCI registry, signs it keyless with their OIDC identity, and indexes it.
-- A user browses the index, sees who signed each brain, and picks one for an agent.
-- The agent connects to that brain's MCP endpoint and reads it. Nothing else.
+**Epic goal:** Be the **only owner of Boltzmann brains** across the Alquimia platform, and serve them to agents as MCP-served knowledge.
+- People build and curate brains over REST (Ledger is the client): create, register evidence, commit, branch, push and pull, converge, all under their own OIDC token.
+- A user browses the index and picks a brain for an agent.
+- The agent connects to that brain's MCP endpoint and reads it. Nothing else: MCP stays read-only.
 
-The service replaces the brain read path in `alquimia-core` and `alquimia-runtime`. It has its own repository, release lifecycle and configuration, and imports no Alquimia package.
+The service replaces the brain read path in `alquimia-core` and `alquimia-runtime`, and the write path in `alquimia-core`'s `boltzmann` package (§17). `pyboltzmann` lives only here. It has its own repository, release lifecycle and configuration, and imports no Alquimia package.
 
 **Target repository:** `https://github.com/alquimia-ai/gaussia-brains-mcp-server`
 
-**Status:** Phase 1 implemented and tested (§13). Per-brain MCP endpoints, REST discovery/management, short brain references, and namespace-index publishing are all working against `registry.alquimia.ai/brains`.
+**Status:** Read path (Phase 1) and the full REST lifecycle (§17, issue #2) implemented and tested (§13).
 
 ---
 
@@ -17,15 +17,20 @@ The service replaces the brain read path in `alquimia-core` and `alquimia-runtim
 
 | # | Decision |
 |---|----------|
-| D1 | **Headless brains.** The server holds no registration, binding or per-brain configuration. A brain exists because it was published. What the server will serve is decided by the source allow-list (§5.4) and the signature policy (§6). |
-| D2 | **Agents connect to one brain.** Each brain has its own MCP endpoint. Its tools search and read *that* brain only. MCP exposes no listing and no modification. |
+| D1 | **A working store per brain; the registry distributes.** *(revised 2026-11-24)* The service holds the working copy of every brain it writes: one OCI image layout per brain on a volume (§17.2). The registry is where brains are distributed -- pushed, pulled, indexed -- not edited. Brains published elsewhere are still served headless for reading: what the server will serve is decided by the source allow-list (§5.4) and the signature policy (§6). |
+| D2 | **Agents connect to one brain, read-only; people write over REST.** *(revised 2026-11-24)* Each brain has its own MCP endpoint. Its tools search and read *that* brain only. MCP exposes no listing and no modification. Every write goes through REST under the user's OIDC token (§17). |
 | D3 | **The server teaches the agent.** MCP `instructions`, tool descriptions and prompts are generated from the brain's manifest, so a bare MCP connection is enough to use a brain well (§4.2). |
 | D4 | **Keyless signatures, feature-flagged.** Publishers sign with Sigstore (OIDC identity). The server verifies and reports *who* signed. `GBMS_SIGNATURE_POLICY` (`off`/`warn`/`required`) decides whether only allow-listed signers are served (§6). |
 | D5 | **Index-managed discovery.** Brains are listed from the registry's namespace index, the same mechanism agentspaces (assistants) use, extended with server-verified signer identities (§7). |
-| D6 | **Coarse authorization.** Any valid token carrying `brains:read` may read any servable brain, in full. No tenants, tiers, per-module rules or approvals (§5.3). |
+| D6 | **Coarse authorization.** *(revised 2026-11-24)* Any valid token carrying `brains:read` may read any servable brain, in full; any token carrying `brains:write` may write any brain in an allowed source. No tenants, tiers, per-brain owners, per-module rules or approvals (§5.3). |
 | D7 | **Pin or follow, user's choice.** An agent connects by digest (`@sha256:…`, immutable) or by tag (`:main`, follows new publishes). Both are offered when a brain is picked. |
 | D8 | **OAuth 2.0 resource server, open standards, no SPIFFE dependency** (§5). |
 | D9 | **One listener.** REST (`/v1`), the RFC 9728 metadata and MCP (`/mcp/...`, Streamable HTTP) share one port and one OAuth resource identifier. stdio serves a single configured brain. |
+| D10 | **Signing and governance deferred.** Run with `GBMS_SIGNATURE_POLICY=off`; brains created here are ungoverned, and unsigned snapshots are served with a warning (`GBMS_VERIFY_UNSIGNED=warn`). Governed brains (a trust root in their history) are imported as they are and served **read-only** until keyless OIDC signing returns. |
+| D11 | **One writer replica, a per-brain write lock.** The writer replica owns the volume (ReadWriteOnce). A write holds its brain's lock (in-process, plus an `flock` on the volume against a second process). Reads never lock; read-only replicas without a volume still scale (§17.2). |
+| D12 | **Long operations are jobs.** Push, pull, converge and import answer `202` with a job; `GET /v1/jobs/{id}` reports it; a cancel is accepted until the job's point of no return (the manifest write, or the head pointer moving) (§17.4). |
+| D13 | **The actor is the token's human; the client names the producer.** Provenance records the JWT principal (its address claim, else `<namespace>/<sub>`) as actor. The client supplies only what it alone knows: the model that proposed the candidates (`producer`) and any assisting agents (§17.5). |
+| D14 | **Optimistic concurrency and stable outcomes.** A write may carry `If-Match: <head digest>` and is refused with `409 not_fast_forward` if the branch head moved. Lifecycle errors carry a lowercase `code` that maps one-to-one to a client outcome (§17.3). |
 
 ---
 
@@ -62,9 +67,10 @@ The service replaces the brain read path in `alquimia-core` and `alquimia-runtim
 - Signature verification and the signer allow-list.
 - Index-based discovery over REST.
 - JWT auth.
+- The brain lifecycle over REST: a working store per brain, writes, branches, push/pull, converge, import (§17).
 
 **Out of scope:**
-- **Pushing and signing artifacts:** building a brain and signing it with cosign still belongs to publisher tooling (`pyboltzmann` / `alquimia` CLI, CI workflows).
+- **Signing artifacts:** cosign/keyless signing of pushed brains and governance (trust roots) are deferred (D10). Building and pushing brains is now in scope (§17).
 - **Picking brains for agents:** storing which brain an agent uses belongs to the agent platform's config. This service hands out the URLs.
 - **Writes through MCP.**
 
@@ -97,8 +103,12 @@ src/gaussia_brains_mcp_server/
 ├── catalog.py      # namespace-index reader, signer enrichment, publish/unpublish/reindex [done]
 ├── guidance.py     # MCP instructions / tool descriptions / prompts from a manifest  [done]
 ├── mcp_server.py   # per-brain MCP endpoints and tools                               [done]
-├── api/            # REST /v1                                                         [done]
-├── indices/        # ported search engines + embedding client                         [todo]
+├── api/            # REST /v1: discovery (brains.py), lifecycle + jobs (lifecycle.py) [done]
+├── text.py         # tokenizer / accent folding (ported from core)                    [done]
+├── embeddings.py   # OpenAI-compatible /v1/embeddings client                          [done]
+├── indices/        # ported search engines + hybrid planner                           [done]
+├── search.py       # one search function for MCP and REST                             [done]
+├── lifecycle/      # working store, write lock, jobs, actor, errors, operations       [done]
 └── main.py         # app: REST + MCP on one listener; stdio mode                      [done]
 ```
 
@@ -204,9 +214,12 @@ The per-issuer mapping reads `sub`, scopes (`scope`/`scp`), roles (dotted paths,
 
 | Scope | Allows |
 |-------|--------|
-| `brains:read` | Connect to any servable brain over MCP and use its tools on every module. |
-| `brains:catalog` | `GET /v1/brains` and `GET /v1/brains/{brain_ref}` (discovery). |
+| `brains:read` | Connect to any servable brain over MCP and use its tools on every module; `POST /v1/brains/{ref}/search`. |
+| `brains:catalog` | `GET /v1/brains` and `GET /v1/brains/{brain_ref}` (discovery); reading working-store brains (status, browse, history). |
 | `brains:publish` | `POST /v1/brains/reindex`, `POST /v1/brains/{brain_ref}/publish`, `POST /v1/brains/{brain_ref}/unpublish`. |
+| `brains:write` | Every lifecycle write (§17): create, evidence, commits, branches, push, pull, converge, convergence resolution, import, and `/v1/jobs`. Also reads working-store brains. |
+
+Keycloak (platform bundle): give the client an audience mapper for `GBMS_AUTH_RESOURCE` and map realm roles in `role_scopes`: `brain-reader` → `brains:read`, `brain-catalog` → `brains:catalog`, `brain-publisher` → `brains:publish`, `brain-writer` → `brains:write` (plus `brains:catalog`/`brains:read`, so a Ledger user can browse and search what they write).
 
 Nothing finer-grained exists. A brain is servable when its reference is in an allowed source (§5.4) and it passes the signature policy (§6).
 
@@ -349,11 +362,12 @@ Renaming the annotation keys to a vendor-neutral prefix is §14 Q3.
 
 ## 9. Search quality
 
-pyboltzmann ships no indices; today the built-in verifying scan answers every query (correct, unranked).
+pyboltzmann ships no indices. **Core's index engines are ported** (`indices/`: hash map, B+ tree, BM25 inverted with accent folding, vector, graph, bitmap, and the hybrid RRF planner) behind `IndexProvider`, and every brain -- read cache and working store alike -- is opened with them. MCP `brain_search` and REST `POST .../search` run the same function (`search.py`). Query embeddings come from an OpenAI-compatible `/v1/embeddings` endpoint:
+- settings: `GBMS_EMBEDDINGS_URL`, `GBMS_EMBEDDINGS_MODEL`, `GBMS_EMBEDDINGS_API_KEY`, and `GBMS_EMBEDDINGS_MODEL_TAG` (the `provider/model` tag travelling vector layers are compared against; default `openai/<model>`);
+- served by vLLM, TEI, Ollama, LiteLLM or OpenAI;
+- without one, search runs on the structural indices and reports `narrowing.semantic=false`.
 
-**Parity requires porting core's index engines** behind `IndexProvider`, with query embeddings from an OpenAI-compatible `/v1/embeddings` endpoint:
-- settings: `GBMS_EMBEDDINGS_URL`, `GBMS_EMBEDDINGS_MODEL`;
-- served by vLLM, TEI, Ollama, LiteLLM or OpenAI.
+Scoring, tokenization and tie-breaking are unchanged from core, so the same brain and query give the same top-k.
 
 **Embedding-model mismatch:** vector layers embedded by another model are skipped (already wired via `accepts_vector_index`).
 
@@ -375,11 +389,17 @@ pyboltzmann ships no indices; today the built-in verifying scan answers every qu
 | `GBMS_SIGNATURE_POLICY` | `off` | `off` · `warn` · `required` |
 | `GBMS_TRUSTED_SIGNERS` | `[]` | Keyless allow-list |
 | `GBMS_COSIGN_KEY` | — | Key-based alternative |
-| `GBMS_VERIFY_UNSIGNED` / `GBMS_REQUIRED_SIGNATURES` | `refuse` / `1` | Authorship layer |
+| `GBMS_VERIFY_UNSIGNED` / `GBMS_REQUIRED_SIGNATURES` | `warn` / `1` | Authorship layer (D10) |
 | `GBMS_AUTH_RESOURCE` / `GBMS_AUTH_ISSUERS` | `http://localhost:8000` / `[]` | OAuth resource, trusted issuers |
 | `GBMS_AUTH_ENABLED` / `GBMS_ALLOW_INSECURE_DEV` | `true` / `false` | Dev escape hatch (both needed) |
 | `GBMS_CACHE_TTL_SECONDS` / `GBMS_CACHE_MAX_BRAINS` | `300` / `4` | Cache |
-| `GBMS_REGISTRY_CONFIG` / `GBMS_REGISTRY_USERNAME` / `_PASSWORD` | — | Registry credentials (password via stdin) |
+| `GBMS_REGISTRY_CONFIG` / `GBMS_REGISTRY_USERNAME` / `_PASSWORD` | — | Registry credentials (password via stdin), held server-side; need push rights on the writer |
+| `GBMS_STORE_ROOT` | — | Working-store volume; unset = read-only replica |
+| `GBMS_STORE_LOCK_TIMEOUT_SECONDS` / `GBMS_STORE_MAX_READ_HANDLES` | `30` / `8` | Write-lock wait; read handles kept per brain |
+| `GBMS_STORE_MAX_EVIDENCE_BYTES` / `GBMS_STORE_MAX_IMPORT_BYTES` | 50 MiB / 2 GiB | Upload limits |
+| `GBMS_JOBS_MAX_RETAINED` | `500` | Finished jobs kept for `GET /v1/jobs/{id}` |
+| `GBMS_ACTOR_CLAIM` / `GBMS_ACTOR_NAMESPACE` | `email` / issuer host | Who a write is attributed to |
+| `GBMS_EMBEDDINGS_URL` / `_MODEL` / `_API_KEY` / `_MODEL_TAG` | — | Semantic search |
 
 ---
 
@@ -426,11 +446,21 @@ pyboltzmann ships no indices; today the built-in verifying scan answers every qu
 - [x] Removed: bindings design, per-module authorization (`authz.py`), tenant/tier claims.
 - [x] 85 tests, no network required for unit tests.
 
+### Done (issue #2: the brain lifecycle over REST)
+
+- [x] Phase 0, contract: `docs/openapi.json` generated from the app (`scripts/export_openapi.py`, kept current by a test); stable lifecycle error codes (§17.3); scope `brains:write`; decisions D1, D2, D6 revised and D10–D14 added; Keycloak role → scope mapping (§5.3).
+- [x] Phase 1, write foundation: working store on a volume, per-brain write lock (in-process + `flock`), job runner, actor from the JWT; ports of core's `store`, `workspace`, `errors`.
+- [x] Phase 2, read and write endpoints: create, evidence, commits (with `dry_run`), browse, block detail, history, search; ported search engines and embeddings client, shared with MCP.
+- [x] Phase 3, distribution: branches (`br.<name>` tags; main's tag only moves from main), push/pull jobs over server-held credentials, index on push of main.
+- [x] Phase 4, converge and convergence resolution endpoints (port of `reconcile`).
+- [x] Phase 5, import from the registry or an uploaded OCI layout; k8s PVC, `Recreate` writer Deployment.
+- [x] End-to-end against a local OCI registry through `oras`: create → evidence → commit → push (+index entry) → import → pull → push → converge (fast-forward) → search from a read-only replica.
+
 ### Remaining
 
 | Phase | Work | Acceptance |
 |-------|------|------------|
-| 2 | Index-engine port + embedding client; conformance test | Top-k parity with core |
+| 2 | Conformance test against core for the ported engines | Top-k parity with core on a fixture brain |
 | 2 | Rollback detection for followed tags | Republished ancestor refused |
 | 3 | Dockerfile; CI (ruff, mypy, pytest, import-linter); fixture pipeline in Zot | Green pipeline |
 | 3 | Runtime integration behind a flag; agent-builder brain picker; publisher re-sign/index script | Staging agents read brains via MCP |
@@ -441,10 +471,11 @@ pyboltzmann ships no indices; today the built-in verifying scan answers every qu
 
 ## 14. Open questions
 
-1. **Authorship default.** With keyless publisher signatures as the main trust signal, should `GBMS_VERIFY_UNSIGNED` default to `warn` (accept ungoverned brains whose publisher is trusted) instead of `refuse`?
+1. ~~**Authorship default.**~~ Decided (D10): `GBMS_VERIFY_UNSIGNED` defaults to `warn`, because brains created here are ungoverned until signing returns.
 2. **Signer allow-list scope.** One global list (current), or a list per allowed source/namespace (e.g. namespace `acme/` trusts only ACME's workflows)? A per-namespace list is a backwards-compatible extension of the config.
 3. **Index annotation keys.** Keep `ai.alquimia.registry.index.*` for compatibility with agentspace tooling, or move brains to a neutral prefix (e.g. `ai.gaussia.index.*`) and read both during a transition?
-4. **Authoring tooling home.** The service now exposes publish/unpublish/reindex REST endpoints. Push and cosign signing still live in publisher tooling (`alquimia` / `pyboltzmann` CLI, CI workflows), which may call these endpoints after signing.
+4. ~~**Authoring tooling home.**~~ Decided (issue #2): this service is the authoring home. Ledger is a thin REST client; core drops its `boltzmann` package. Cosign signing of pushed brains returns with keyless OIDC signing.
+6. **Issue #2 questions, answered for now:** write authorization is any `brains:write` holder on any brain (no per-brain owners yet; D6); the working store is a single writer replica on a volume, no Lease (D11); governed brains are served read-only, not converted (D10); embeddings come from an OpenAI-compatible endpoint (§9).
 5. **MCP resources.** Also expose canonical documents as MCP resources (`brain://block/<id>`) so clients can open sources natively? Recommendation: after Phase 1.
 
 ---
@@ -476,3 +507,95 @@ pyboltzmann ships no indices; today the built-in verifying scan answers every qu
 | 2026-11-03 | Pin or follow, user's choice (D7) | Reproducibility when wanted, freshness when wanted. |
 | 2026-11-05 | Short brain references (`brains/name:tag`) and default registry | Usability; matches the public `registry.alquimia.ai/brains` namespace. |
 | 2026-11-05 | Management endpoints for publish/unpublish/reindex | Keep publisher tooling (CLI/CI) thin; still require `brains:publish`. |
+| 2026-11-24 | This service owns the brain lifecycle; a working store per brain (D1, D2 revised) | One owner of `pyboltzmann`; Ledger becomes a thin REST client; core drops `boltzmann`. |
+| 2026-11-24 | `brains:write`, any holder writes any brain (D6 revised) | Simplest model that ships; per-brain owners can come later without a schema change. |
+| 2026-11-24 | Signing and governance deferred; governed brains read-only (D10) | Keyless OIDC signing comes later; nothing governed is written without it. |
+| 2026-11-24 | Single writer replica with a per-brain lock, no Lease (D11) | Simplest correct concurrency; read replicas still scale. |
+| 2026-11-24 | Jobs for push/pull/converge/import (D12); actor from the JWT (D13); `If-Match` and stable codes (D14) | Long operations must not hold a request open; provenance names the human; clients branch on outcomes, not text. |
+
+---
+
+## 17. The brain lifecycle over REST (issue #2)
+
+The machine-readable contract is `docs/openapi.json` (generated from the app; a test fails when it is stale). This section is the prose around it.
+
+### 17.1 Surface
+
+Relative to `/v1/brains`. `{ref}` accepts short forms (`brains/handbook`) and names the brain's repository; a tag in it is ignored except on create/import, where it sets the default tag.
+
+| Area | Endpoints | Scope | Port of core's |
+|------|-----------|-------|----------------|
+| Create, status | `POST /` · `GET /{ref}` (held: modules and counts, head, branches, open convergence, publication; `ETag` = branch head) · `GET /?held=true` | write · catalog/read/write | `store.py`, `workspace.py` |
+| Browse | `GET /{ref}/modules/{mt}/blocks?branch&cursor&limit` (newest first; superseded and unreadable blocks included) · `GET /{ref}/blocks/{id}` (provenance, supersession, verification, extracted text) · `GET /{ref}/history?branch&cursor` | catalog/read/write | `workspace.py` |
+| Search | `POST /{ref}/search` (same function as MCP; `truncated`, `narrowing`) — held brains at a branch head, any other servable brain through the read cache | read/catalog/write | `indices/` |
+| Writes | `POST /{ref}/evidence` (multipart) · `POST /{ref}/commits` (`dry_run`) | write | `workspace.py` |
+| Branches | `GET /{ref}/branches?remote` · `POST /{ref}/branches` · `DELETE /{ref}/branches/{name}?force` | write (GET: read) | `branches.py` |
+| Distribution | `POST /{ref}/branches/{name}/push` (`force`) · `POST /{ref}/pull` — jobs | write | `distribution.py` |
+| Converge | `POST /{ref}/converge` (`from`, `into`, `strategy`, `reason`, `fast_forward`) — job · `GET /{ref}/convergence` · `POST /{ref}/convergence/resolutions` · `…/accept-removals` · `…/continue` · `…/abort` | write (GET: read) | `reconcile.py` |
+| Import | `POST /{ref}/import` — JSON (from the registry) or multipart `layout` (an uploaded OCI layout) — job | write | — |
+| Jobs | `GET /v1/jobs?brain` · `GET /v1/jobs/{id}` · `POST /v1/jobs/{id}/cancel` | write | — |
+
+**Deferred** (as the issue says): `authenticity.py` (governance, ssh signing, trust roots), cosign signing of pushes, `migration.py` (governed re-founding), core's Leviathan `ingest.py` (the proposer stays client-side: Ledger proposes, this service validates and commits). Retention operations (drop, supersede, demote, redact) are not exposed yet.
+
+### 17.2 Working store and concurrency (D1, D11)
+
+`GBMS_STORE_ROOT/<sha256(reference)[:32]>/` holds `brain.json` (reference, default tag, title, creator, import source) and `layout/` (the OCI layout pyboltzmann writes). The directory name is a hash, so no reference chooses where it lands.
+
+- **Writes** hold the brain's lock: an `asyncio.Lock` (waits up to `GBMS_STORE_LOCK_TIMEOUT_SECONDS`, then `not_fast_forward` "busy") and an `flock` on `.write.lock` (a second process mounting the volume is refused). SDK calls run in a worker thread under the lock.
+- **Reads** never lock. They read the pointers (replaced atomically) and open a handle pinned to the branch head's snapshot (immutable), kept in a small LRU per brain.
+- **Branch-addressed writes.** A working copy has one current branch; every write names its branch (`main` when omitted) and the service checks it out under the lock first.
+- **Read replicas** run without `GBMS_STORE_ROOT`: MCP, discovery and search of published brains; every lifecycle write answers `refused_policy`.
+
+### 17.3 Errors (D14)
+
+Every lifecycle error is `{"code", "message", "detail"}` with a code that maps one-to-one to a client (Ledger) outcome:
+
+| Code | HTTP | Meaning |
+|------|------|---------|
+| `usage` | 400 | Asked wrong: bad input, a name that exists, a missing strategy, a job past its point of no return. |
+| `not_found` | 404 | Brain, branch, block, job or remote reference does not exist. |
+| `refused_protocol` | 422 | The protocol refused: append-only violation, unmerged branch, rollback, a snapshot not held, a layout that does not verify. |
+| `refused_policy` | 403 | A policy refused: governed brain (read-only), source outside the allow-list, authenticity, read-only replica, no usable actor in the token. |
+| `rejected_candidates` | 422 | A commit whose candidates did not all validate; nothing written; `detail.report` has every verdict. |
+| `not_fast_forward` | 409 | `If-Match` is stale, the remote moved on (divergence, lost publish), or the brain is busy with another write. |
+| `registry_unavailable` | 502 | The registry could not be reached or read. |
+| `needs_human` | 409 | A convergence is open or stopped to ask; resolve it via `/convergence`. |
+| `internal` | 500 | Anything else (not a client outcome). |
+
+The MCP tool errors and the discovery endpoints keep their existing uppercase codes (§4.4).
+
+### 17.4 Jobs (D12)
+
+Push, pull, converge and import answer `202` with the job (and `Location: /v1/jobs/{id}`). A job is `queued → running → succeeded | failed | cancelled`, carries its `stage`, and on failure an `error` with a §17.3 code. `POST /v1/jobs/{id}/cancel` is accepted until the job's point of no return and refused with `usage` after it:
+
+| Job | Cancellable until |
+|-----|-------------------|
+| push | the manifest write (blobs already uploaded are harmless) |
+| pull, import | the head pointer moves (the transfer is a `fetch` first, then a pull of what was fetched) |
+| converge | the join starts (a remote source is fetched first) |
+
+Jobs live in memory: a restart forgets finished ones and kills running ones, which is safe because nothing is half-written (blobs are content-addressed, pointers move last).
+
+### 17.5 Writes, attribution and concurrency (D13, D14)
+
+- **Actor** = the token's human: the `GBMS_ACTOR_CLAIM` claim (default `email`) lower-cased when it is an address, else `<GBMS_ACTOR_NAMESPACE or issuer host>/<sub>`. pyboltzmann hashes it into every provenance record, so it is never taken from the request body.
+- **Producer** = what the client says proposed the candidates (`{"kind": "model", "id": "openai/gpt-4.1"}`), validated as an actor identifier. Assisting agents (`assisted_by`) are recorded beside the actor; when given, name the model on the agent (`{"id": "alquimia/ledger", "kind": "agent", "model": "openai/gpt-4.1"}`), since the second provenance schema records parties instead of a producer.
+- **Evidence** registration is observation: it records no producer. Identical bytes are a no-op (`duplicate: true`).
+- **Commits are all or nothing.** The candidates are validated against a task over the source block; a dry run returns every verdict; a commit with any non-validated candidate writes nothing and answers `rejected_candidates`.
+- **`If-Match: <head digest>`** on evidence and commits is compared with the branch head before anything is written; responses carry the new head (and `ETag`).
+
+### 17.6 Branches and distribution
+
+- `main` publishes to the brain's default tag (set at create; never in the `br.` namespace); any other branch to `br.<name>` with `/` as `.`. A branch whose tag would equal main's is refused, so **main's tag only moves from main**. The SDK's ref table is re-aligned to the default tag after every operation that writes it.
+- Push publishes the branch's head with the SDK's fast-forward check (`force` overrides it, discarding the remote's work); a push of main then attaches the brain to its namespace index (a failure to index is reported on the job, not fatal) and drops the read cache's copy.
+- Deleting a branch removes the local ref; a pushed tag stays (registries delete manifests, not tags).
+
+### 17.7 Converge
+
+`from` is a local branch, a tag of the brain's own repository, or `registry/repo:tag`. A remote history is fetched first, given a temporary branch, and joined like a local one: nothing when already contained, a fast-forward when `into` is behind, otherwise a reconciliation recorded with `strategy` -- **required when the histories diverged, never defaulted**, because merge keeps the other side's snapshots and signatures while rebase and squash re-sign the work as the actor. A reconciliation that does not apply cleanly ends the job with `needs_human` and leaves the convergence open (it refuses every other write to the brain until settled): `GET /convergence` shows it, `resolutions` (`admit`, `reject`, `prefer`) and `accept-removals` answer it, `continue` concludes it (`needs_human` if something is still open), `abort` abandons it.
+
+### 17.8 Import
+
+- **From the registry** (`{"source": "registry/repo:tag"}`, default the brain's own reference): a new brain is created and the tag pulled into it.
+- **From an upload** (multipart `layout`): a `.tar`/`.tar.gz` of a brain's OCI layout as pyboltzmann writes it (e.g. a CLI brain under `~/.alquimia/registry/brains/<id>`). It is unpacked with tar's `data` filter (no links, no paths outside), opened and verified against its own roots, and only then replaces the new brain's empty layout.
+- A failed import leaves nothing behind. Governed brains import as they are and are served read-only (D10).

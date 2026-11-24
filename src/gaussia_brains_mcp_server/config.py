@@ -216,8 +216,61 @@ class Settings(BaseSettings):
     cache_failure_backoff_seconds: float = Field(default=30.0, ge=0)
     cache_failure_backoff_max_seconds: float = Field(default=300.0, ge=0)
 
+    # ── Working store (the write path) ───────────────────────────────────
+    #: Directory holding one OCI image layout per brain this service writes
+    #: (a persistent volume). Unset makes this replica read-only: every
+    #: lifecycle endpoint answers 503 and only MCP and discovery are served.
+    store_root: str | None = None
+    #: Seconds a write waits for another write to the same brain to finish
+    #: before it is refused (``brain_busy``).
+    store_lock_timeout_seconds: float = Field(default=30.0, ge=0)
+    #: Read handles kept open per brain (one per branch head being browsed).
+    store_max_read_handles: int = Field(default=8, ge=1)
+    #: Largest evidence upload accepted, in bytes.
+    store_max_evidence_bytes: int = Field(default=50 * 1024 * 1024, ge=1)
+    #: Largest uploaded OCI layout (tar or tar.gz) accepted for import, in bytes.
+    store_max_import_bytes: int = Field(default=2 * 1024 * 1024 * 1024, ge=1)
+    #: Finished jobs kept for ``GET /v1/jobs/{id}``, oldest dropped first.
+    jobs_max_retained: int = Field(default=500, ge=1)
+
+    # ── Who a write is attributed to ─────────────────────────────────────
+    #: Token claim holding the human's address (lower-cased before use).
+    actor_claim: str = "email"
+    #: Namespace for actors whose token carries no usable address: the actor
+    #: becomes ``<namespace>/<sub>``. Empty means the issuer's host name.
+    actor_namespace: str = ""
+
+    # ── Search engines (shared by MCP and REST) ──────────────────────────
+    #: OpenAI-compatible embeddings endpoint (``.../v1``; ``/embeddings`` is
+    #: appended). Unset disables the vector index: search then runs on the
+    #: structural indices (hash map, B+ tree, inverted, graph, bitmap).
+    embeddings_url: str | None = None
+    embeddings_model: str | None = None
+    embeddings_api_key: SecretStr | None = None
+    #: The tag travelling vector layers are compared against, as publishers
+    #: write it (``provider/model``, e.g. ``openai/text-embedding-3-small``).
+    #: Defaults to ``openai/<embeddings_model>``.
+    embeddings_model_tag: str | None = None
+    embeddings_timeout_seconds: float = Field(default=30.0, gt=0)
+    embeddings_batch_size: int = Field(default=64, ge=1)
+    #: Characters of a block's text that are indexed.
+    index_max_chars: int = Field(default=1_000_000, ge=1)
+    #: Characters of a block's named content read for search and display.
+    content_max_chars: int = Field(default=8192, ge=1)
+
+    def effective_embeddings_model_tag(self) -> str | None:
+        if not self.embeddings_model:
+            return None
+        if self.embeddings_model_tag:
+            return self.embeddings_model_tag
+        if "/" in self.embeddings_model:
+            return self.embeddings_model
+        return f"openai/{self.embeddings_model}"
+
     # ── Snapshot authorship verification (pyboltzmann) ───────────────────
-    verify_unsigned: UnsignedPolicy = UnsignedPolicy.REFUSE
+    #: ``warn``, not ``refuse``: brains this service creates are ungoverned
+    #: until keyless signing lands (decision D10), and must stay servable.
+    verify_unsigned: UnsignedPolicy = UnsignedPolicy.WARN
     required_signatures: int = Field(default=1, ge=1)
     allow_propose_head: bool = False
     #: Actor id the read-only brain handle is opened as. Must be an address or

@@ -15,12 +15,20 @@ from starlette.types import Receive, Scope, Send
 
 from gaussia_brains_mcp_server import __version__
 from gaussia_brains_mcp_server.api.brains import router as brains_router
+from gaussia_brains_mcp_server.api.lifecycle import jobs_router
+from gaussia_brains_mcp_server.api.lifecycle import router as lifecycle_router
 from gaussia_brains_mcp_server.auth.http import metadata_router, resource_metadata_url
 from gaussia_brains_mcp_server.auth.scopes import READ
 from gaussia_brains_mcp_server.auth.verifier import TokenVerifier
 from gaussia_brains_mcp_server.cache import BrainCache
 from gaussia_brains_mcp_server.config import Settings, get_settings
+from gaussia_brains_mcp_server.indices import EngineIndexProvider, configure_engines
+from gaussia_brains_mcp_server.lifecycle.errors import LifecycleError
+from gaussia_brains_mcp_server.lifecycle.jobs import JobRunner
+from gaussia_brains_mcp_server.lifecycle.service import LifecycleService
+from gaussia_brains_mcp_server.lifecycle.workstore import WorkingStore
 from gaussia_brains_mcp_server.mcp_server import BrainMcpAsgiApp, create_brain_server
+from gaussia_brains_mcp_server.store import set_index_provider
 
 
 def _parse_brain_ref(brain_ref: str, settings: Settings) -> tuple[str, str]:
@@ -123,16 +131,38 @@ async def lifespan(app: FastAPI) -> Any:
     settings = get_settings()
     app.state.settings = settings
     app.state.token_verifier = TokenVerifier(settings)
+    install_engines(settings)
     app.state.brain_cache = BrainCache(settings)
     app.state.mcp_apps = {}  # type: ignore[misc]
     app.state.mcp_apps_lock = asyncio.Lock()
+    jobs = JobRunner(max_retained=settings.jobs_max_retained)
+    app.state.lifecycle = None
+    if settings.store_root:
+        app.state.lifecycle = LifecycleService(
+            settings,
+            WorkingStore(settings),
+            jobs,
+            cache=app.state.brain_cache,
+        )
+        logger.info("Working store at {} (writes enabled)", settings.store_root)
+    else:
+        logger.info("No GBMS_STORE_ROOT: read-only replica, lifecycle writes disabled")
 
     for problem in settings.startup_problems():
         logger.warning("Startup problem: {}", problem)
 
-    async with anyio.create_task_group() as tg:
-        app.state.mcp_task_group = tg
-        yield
+    try:
+        async with anyio.create_task_group() as tg:
+            app.state.mcp_task_group = tg
+            yield
+    finally:
+        await jobs.aclose()
+
+
+def install_engines(settings: Settings) -> None:
+    """Open every brain with the ported search engines (MCP and REST alike)."""
+    configure_engines(settings)
+    set_index_provider(EngineIndexProvider())
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -150,6 +180,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
 
     app.include_router(metadata_router(settings))
+    # Lifecycle routes first: the discovery router ends in a catch-all
+    # ``GET /v1/brains/{brain_ref:path}`` that would shadow them.
+    app.include_router(lifecycle_router)
+    app.include_router(jobs_router)
     app.include_router(brains_router)
     app.mount(mcp_path, McpDispatchApp(app))
 
@@ -157,6 +191,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def _healthz() -> dict[str, Any]:
         """Liveness/readiness probe."""
         return {"status": "ok", "version": __version__}
+
+    @app.exception_handler(LifecycleError)
+    async def _lifecycle_error_handler(
+        _request: Any, exc: LifecycleError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status,
+            content={"code": exc.code, "message": exc.message, "detail": exc.detail},
+        )
 
     @app.exception_handler(HTTPException)
     async def _http_exception_handler(
@@ -198,6 +241,7 @@ async def _run_stdio(settings: Settings) -> None:
             "GBMS_STDIO_BEARER_TOKEN is required unless GBMS_ALLOW_INSECURE_DEV=true"
         )
 
+    install_engines(settings)
     cache = BrainCache(settings)
     server = create_brain_server(reference, tag, settings, cache)
     init_options = server.create_initialization_options()

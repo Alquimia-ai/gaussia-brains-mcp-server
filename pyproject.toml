@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gaussia-brains-mcp-server"
 version = "0.1.0"
-description = "Standalone MCP + REST service for read-only Boltzmann Brain access"
+description = "Standalone MCP + REST service owning the Boltzmann Brain lifecycle"
 readme = "README.md"
 license = {text = "GNU General Public License v3.0"}
 authors = [{name = "Alquimia AI", email = "info@alquimia.ai"}]
@@ -14,6 +14,8 @@ classifiers = ["Private :: Do Not Upload"]
 
 dependencies = [
     "fastapi>=0.115.12",
+    # Multipart uploads: evidence (POST .../evidence) and OCI layout imports.
+    "python-multipart>=0.0.20",
     "uvicorn>=0.34.2",
     "pydantic>=2.11.4",
     "pydantic-settings>=2.9.1",

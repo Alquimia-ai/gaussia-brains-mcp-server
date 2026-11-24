@@ -1,0 +1,12 @@
+# The working store: one OCI image layout per brain this service writes (GBMS_STORE_ROOT).
+# ReadWriteOnce on purpose: exactly one writer replica mounts it (decision D11). Size it for the
+# brains you hold, sources included -- canonical evidence is stored byte for byte.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gaussia-brains-mcp-server-store
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi

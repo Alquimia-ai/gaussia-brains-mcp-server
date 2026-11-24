@@ -14,5 +14,10 @@ READ = "brains:read"
 CATALOG = "brains:catalog"
 #: Publish, unpublish, and reindex brains in the namespace index over REST.
 PUBLISH = "brains:publish"
+#: Change brains through the working store: create, register evidence,
+#: commit, branch, push, pull, converge and import. Writes are attributed to
+#: the token's human subject. Reading a working-store brain (status, browse,
+#: history, search) needs ``brains:catalog`` or ``brains:read`` instead.
+WRITE = "brains:write"
 
-ALL = (READ, CATALOG, PUBLISH)
+ALL = (READ, CATALOG, PUBLISH, WRITE)

@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any, cast
+from typing import Any
 
 import anyio
 from anyio.abc import TaskStatus
@@ -45,6 +45,7 @@ from gaussia_brains_mcp_server.guidance import (
     build_tools,
     content_to_text,
 )
+from gaussia_brains_mcp_server.search import SearchInputError, search_brain
 from gaussia_brains_mcp_server.signatures import SignatureReport, get_signature_verifier
 
 
@@ -148,10 +149,12 @@ async def _handle_search(
     query_text = arguments.get("query", "")
     if not isinstance(query_text, str):
         return _tool_error("query must be a string", "QUERY_INVALID")
-    limit = int(arguments.get("limit", 10))
-    expand_depth = int(arguments.get("expand_depth", 0))
+    try:
+        limit = int(arguments.get("limit", 10))
+        expand_depth = int(arguments.get("expand_depth", 0))
+    except (TypeError, ValueError):
+        return _tool_error("limit and expand_depth must be integers", "QUERY_INVALID")
     raw_types = arguments.get("memory_types")
-    filters: dict[str, Any] = {}
     if raw_types is not None:
         if not isinstance(raw_types, list) or not all(
             isinstance(t, str) for t in raw_types
@@ -160,50 +163,29 @@ async def _handle_search(
                 "memory_types must be a list of strings", "MEMORY_TYPE_INVALID"
             )
         try:
-            filters["memory_types"] = _parse_memory_types(raw_types)
+            _parse_memory_types(raw_types)
         except ValueError as exc:
             return _tool_error(f"invalid memory type: {exc}", "MEMORY_TYPE_INVALID")
 
-    from boltzmann.query import Query, QueryFilters, QueryHints
-
-    query = Query(
-        text=query_text,
-        filters=cast(QueryFilters, filters),
-        hints=QueryHints(limit=limit, expand_depth=expand_depth),
-    )
+    # The same function REST search runs, so agents and people get one top-k.
     try:
-        bundle = ctx.brain.search(query)
+        found = await anyio.to_thread.run_sync(
+            lambda: search_brain(
+                ctx.brain,
+                query_text,
+                memory_types=raw_types,
+                limit=limit,
+                expand_depth=expand_depth,
+            )
+        )
+    except SearchInputError as exc:
+        return _tool_error(str(exc), "QUERY_INVALID")
     except Exception as exc:
         info = describe_brain_error(exc)
         return _tool_error(info.message, info.code)
-
-    results = []
-    for match in bundle.matches:
-        if not match.verified:
-            continue
-        results.append(
-            {
-                "block_id": str(match.block_id),
-                "memory_type": match.memory_type.value,
-                "content": content_to_text(match.content),
-                "score": match.score,
-                "sources": [
-                    {"block_id": str(src.block_id), "locator": src.locator}
-                    for src in (match.sources or [])
-                ],
-                "locator": next((src.locator for src in (match.sources or [])), None),
-                "resolvable": match.resolvable,
-            }
-        )
-    return _ok_text(
-        {
-            "results": results,
-            "truncated": bundle.truncated,
-            "verified_against": {
-                mt.value: str(root) for mt, root in bundle.verified_against.items()
-            },
-        }
-    )
+    for result in found["results"]:
+        result.pop("verified", None)
+    return _ok_text(found)
 
 
 async def _handle_read_block(

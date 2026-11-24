@@ -157,6 +157,36 @@ def require_scopes(*required: str):
     return _check
 
 
+def require_any_scope(*accepted: str):
+    """Dependency factory: the caller must hold at least one scope in *accepted*."""
+    wanted = frozenset(accepted)
+
+    async def _check(
+        principal: Annotated[Principal, Depends(require_principal)],
+    ) -> Principal:
+        if principal.scopes & wanted:
+            return principal
+        logger.info(
+            "authz denied sub={} iss={} wanted_any={}",
+            principal.subject,
+            principal.issuer,
+            sorted(wanted),
+        )
+        raise HTTPException(
+            status_code=HTTP_403_FORBIDDEN,
+            detail=f"Requires one of the scopes: {sorted(wanted)}",
+            headers={
+                "WWW-Authenticate": www_authenticate(
+                    get_settings(),
+                    error="insufficient_scope",
+                    scope=" ".join(sorted(wanted)),
+                )
+            },
+        )
+
+    return _check
+
+
 def metadata_router(settings: Settings) -> APIRouter:
     """Router serving the protected resource metadata document (unauthenticated)."""
     router = APIRouter()

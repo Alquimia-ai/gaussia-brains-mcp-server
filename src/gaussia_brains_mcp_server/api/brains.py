@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
-from gaussia_brains_mcp_server.auth.http import require_scopes
+from gaussia_brains_mcp_server.auth.http import require_any_scope, require_scopes
 from gaussia_brains_mcp_server.auth.principal import Principal
-from gaussia_brains_mcp_server.auth.scopes import CATALOG, PUBLISH
+from gaussia_brains_mcp_server.auth.scopes import CATALOG, PUBLISH, READ, WRITE
 from gaussia_brains_mcp_server.catalog import catalog
 from gaussia_brains_mcp_server.config import Settings, get_settings
 
@@ -51,9 +52,33 @@ async def list_brains(
     limit: Annotated[
         int, Query(ge=1, le=100, description="Maximum entries to return")
     ] = 20,
+    held: Annotated[
+        bool,
+        Query(
+            description="List the brains held in this service's working store instead"
+        ),
+    ] = False,
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> dict[str, Any]:
     """List brains from namespace indexes with verified signer information."""
+    if held:
+        service = getattr(request.app.state, "lifecycle", None)
+        metas = service.store.list() if service is not None else []
+        return {
+            "entries": [
+                {
+                    "reference": m.reference,
+                    "default_tag": m.default_tag,
+                    "title": m.title,
+                    "description": m.description,
+                    "created_at": m.created_at,
+                    "created_by": m.created_by,
+                    "imported_from": m.imported_from,
+                }
+                for m in metas
+            ],
+            "next_cursor": None,
+        }
     cat = catalog(settings)
     namespaces = (
         [namespace] if namespace else list(settings.effective_catalog_namespaces())
@@ -139,15 +164,37 @@ async def brain_tags(
 @router.get("/{brain_ref:path}")
 async def get_brain(
     request: Request,
+    response: Response,
     brain_ref: str,
-    principal: Annotated[Principal, Depends(require_scopes(CATALOG))],
+    principal: Annotated[Principal, Depends(require_any_scope(CATALOG, READ, WRITE))],
+    branch: Annotated[
+        str | None, Query(description="Branch to report (working-store brains)")
+    ] = None,
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> dict[str, Any]:
-    """Return manifest-level detail for a single brain.
+    """Return detail for a single brain.
+
+    A brain held in the working store reports its status: modules and block
+    counts, head, branches, any open convergence, and its publication, with
+    the branch head as ``ETag`` (send it back as ``If-Match``). Any other
+    brain reports its published manifest.
 
     *brain_ref* may be a short reference such as ``brains/my-brain:latest`` or a
     full OCI reference such as ``registry.example.com/acme/handbook:main``.
     """
+    service = getattr(request.app.state, "lifecycle", None)
+    if service is not None and "@" not in brain_ref:
+        try:
+            handle = service.held(brain_ref)
+        except Exception:  # noqa: BLE001 - not a working-store reference
+            handle = None
+        if handle is not None:
+            status = await asyncio.to_thread(service.status, handle, branch)
+            if status.get("head"):
+                response.headers["ETag"] = f'"{status["head"]}"'
+            return status
+    if not principal.has_scope(CATALOG):
+        raise HTTPException(status_code=403, detail=f"Missing scopes: {[CATALOG]}")
     cat = catalog(settings)
     expanded = settings.expand_brain_ref(brain_ref)
     return await cat.manifest_detail(

@@ -8,6 +8,7 @@ labels:
 resources:
   - serviceaccount.yaml
   - configmap.yaml
+  - pvc.yaml
   - deployment.yaml
   - service.yaml
   - networkpolicy.yaml

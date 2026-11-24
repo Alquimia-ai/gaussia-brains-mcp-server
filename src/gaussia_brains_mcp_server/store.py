@@ -1,15 +1,15 @@
-"""Constructing read-only brain handles.
+"""Constructing read-only brain handles for the read cache.
 
-Brains are always held in a ``MemoryBlockStore``: the registry is the durable
-copy and this process is a cache, discarded with the pod.
+Registry brains served over MCP are held in a ``MemoryBlockStore``: the
+registry is the durable copy and the read cache is discarded with the pod.
+(Brains this service *writes* live in the working store instead, see
+:mod:`gaussia_brains_mcp_server.lifecycle.workstore`.)
 
 Search quality is decided by the planner and indices. pyboltzmann ships none
--- ``planner=None`` gives its built-in verifying scan -- and the engines in
-``alquimia.boltzmann.indices`` depend on ``alquimia.core`` (embeddings, text
-folding). They are to be ported here behind :class:`IndexProvider`, with
-query embeddings coming from a configurable embedding endpoint rather than
-the Alquimia embeddings config (docs/proposal.md §7). Until then the scan
-answers every query, correctly but without semantic ranking.
+-- ``planner=None`` gives its built-in verifying scan. The application installs
+:class:`gaussia_brains_mcp_server.indices.EngineIndexProvider` at startup (the
+engines ported from core, with query embeddings from an OpenAI-compatible
+endpoint); the scan provider below remains the default for library use.
 """
 
 from __future__ import annotations
