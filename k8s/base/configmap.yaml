@@ -23,6 +23,10 @@ data:
   # Writes are attributed to the token's human: this claim when it is an address, else
   # <GBMS_ACTOR_NAMESPACE or issuer host>/<sub>.
   GBMS_ACTOR_CLAIM: email
+  # Who may write a brain: owners (its creator, its writers, brains:admin) | open (any writer).
+  GBMS_BRAIN_ACCESS: owners
+  # Seconds jobs past their point of no return get on shutdown (< terminationGracePeriodSeconds).
+  GBMS_SHUTDOWN_GRACE_SECONDS: "25"
   # Semantic search: an OpenAI-compatible /v1/embeddings endpoint. Unset = structural indices only.
   # GBMS_EMBEDDINGS_URL: http://vllm-embeddings.ai.svc.cluster.local:8000/v1
   # GBMS_EMBEDDINGS_MODEL: text-embedding-3-small

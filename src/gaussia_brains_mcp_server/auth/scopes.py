@@ -19,5 +19,10 @@ PUBLISH = "brains:publish"
 #: the token's human subject. Reading a working-store brain (status, browse,
 #: history, search) needs ``brains:catalog`` or ``brains:read`` instead.
 WRITE = "brains:write"
+#: Administer brains in the working store: write any brain whatever its
+#: owners and writers (``GBMS_BRAIN_ACCESS=owners``), grant write access to
+#: any brain, settle any open convergence, and see and cancel every job.
+#: Writes still need ``brains:write``.
+ADMIN = "brains:admin"
 
-ALL = (READ, CATALOG, PUBLISH, WRITE)
+ALL = (READ, CATALOG, PUBLISH, WRITE, ADMIN)

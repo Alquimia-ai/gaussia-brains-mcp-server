@@ -19,6 +19,9 @@ spec:
         alquimia.ai/component: brains-mcp
     spec:
       serviceAccountName: gaussia-brains-mcp-server
+      # On SIGTERM the server refuses new jobs, cancels those before their point of no return
+      # and gives the rest GBMS_SHUTDOWN_GRACE_SECONDS (25) to finish; leave room for that.
+      terminationGracePeriodSeconds: 60
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534

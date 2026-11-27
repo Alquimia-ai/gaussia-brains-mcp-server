@@ -18,7 +18,12 @@ refused_protocol      422     the protocol refused the operation: append-only
                               snapshot this brain does not hold.
 refused_policy        403     a policy refused it: a governed brain (served
                               read-only), a source outside the allow-list, an
-                              authenticity verdict, a read-only replica.
+                              authenticity verdict, a read-only replica
+                              (``detail.replica == "reader"``), a caller who
+                              is not among the brain's owners
+                              (``detail.access == "owners"``,
+                              ``detail.owners``) or may not settle its
+                              convergence.
 rejected_candidates   422     a commit whose candidates did not all validate;
                               nothing was written. ``detail.report`` has
                               every verdict.
@@ -26,9 +31,13 @@ not_fast_forward      409     ``If-Match`` named a head that is no longer the
                               head, the remote moved on, or another write to
                               the brain is in progress. Re-read, then
                               converge or retry.
-registry_unavailable  502     the OCI registry could not be reached or read.
-                              Retry later.
-needs_human           409     a convergence is open, or stopped to ask.
+registry_unavailable  502     the OCI registry could not be reached or read,
+                              or the service is restarting and takes no new
+                              job (``detail.restarting``). Retry later.
+needs_human           409     a convergence is open, or stopped to ask. One
+                              convergence blocks writes to every branch of the
+                              brain; ``detail.convergence`` names the branch it
+                              is open on, its ``actor`` and ``theirs``.
                               Resolve it via ``/convergence``.
 internal              500     anything else (not a client outcome).
 unauthenticated       401     no bearer token, or one that did not verify.
@@ -37,6 +46,23 @@ unauthenticated       401     no bearer token, or one that did not verify.
 ====================  ======  ===============================================
 
 Codes are part of the semver contract: they are appended, never reassigned.
+
+A job (``GET /v1/jobs/{id}``) that did not succeed carries the same body in
+``error``, with two more codes that are a job's own outcome and never an HTTP
+response:
+
+====================  =======================================================
+job error code        meaning / what the client does
+====================  =======================================================
+cancelled             the job was cancelled before its point of no return
+                      (by its owner, or because the service shut down);
+                      nothing was changed. Run it again if still wanted.
+interrupted           the service restarted while the job ran (job ``state``
+                      ``failed``, ``stage`` ``interrupted``).
+                      ``detail.passed_commit_point`` false: nothing was
+                      changed, run it again. True: it may have completed;
+                      re-read the brain's status before retrying.
+====================  =======================================================
 
 Authorization failures are not a separate code: a token that verified but
 lacks a scope is ``refused_policy`` (403), the same outcome as any other

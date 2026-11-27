@@ -2,8 +2,11 @@
 
 Reads (status, browse, history, search) need ``brains:catalog``, ``brains:read``
 or ``brains:write``; everything that changes a brain needs ``brains:write`` and
-is attributed to the token's human subject. Push, pull, converge and import
-answer ``202`` with a job (``GET /v1/jobs/{id}``).
+is attributed to the token's human subject. Under ``GBMS_BRAIN_ACCESS=owners``
+(the default) a brain is written only by its owner (its creator), the writers
+it lists, or a ``brains:admin`` token. Push, pull, converge and import answer
+``202`` with a job (``GET /v1/jobs/{id}``); a caller sees and cancels only its
+own jobs unless it holds ``brains:admin``.
 
 Errors carry a stable ``code`` (see :mod:`gaussia_brains_mcp_server.lifecycle.errors`)::
 
@@ -22,6 +25,7 @@ from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+from boltzmann import Actor
 from fastapi import (
     APIRouter,
     Depends,
@@ -42,10 +46,11 @@ from starlette.formparsers import MultiPartException, MultiPartParser
 
 from gaussia_brains_mcp_server.auth.http import require_any_scope, require_scopes
 from gaussia_brains_mcp_server.auth.principal import Principal
-from gaussia_brains_mcp_server.auth.scopes import CATALOG, READ, WRITE
+from gaussia_brains_mcp_server.auth.scopes import ADMIN, CATALOG, READ, WRITE
 from gaussia_brains_mcp_server.config import Settings, get_settings
 from gaussia_brains_mcp_server.lifecycle.errors import (
     ALL_CODES,
+    NOT_FOUND,
     REFUSED_POLICY,
     USAGE,
     LifecycleError,
@@ -55,6 +60,7 @@ from gaussia_brains_mcp_server.lifecycle.identity import actor_for
 from gaussia_brains_mcp_server.lifecycle.jobs import Job
 from gaussia_brains_mcp_server.lifecycle.service import (
     LifecycleService,
+    decode_inline_evidence,
     search_registry,
 )
 
@@ -115,6 +121,8 @@ jobs_router = APIRouter(prefix="/v1/jobs", tags=["jobs"], route_class=LifecycleR
 ReadPrincipal = Annotated[Principal, Depends(require_any_scope(CATALOG, READ, WRITE))]
 SearchPrincipal = Annotated[Principal, Depends(require_any_scope(READ, CATALOG, WRITE))]
 WritePrincipal = Annotated[Principal, Depends(require_scopes(WRITE))]
+JobsPrincipal = Annotated[Principal, Depends(require_any_scope(WRITE, ADMIN))]
+GrantPrincipal = Annotated[Principal, Depends(require_any_scope(WRITE, ADMIN))]
 IfMatch = Annotated[
     str | None,
     Header(
@@ -166,6 +174,7 @@ RESERVED_SEGMENTS = frozenset(
         "accept-removals",
         "continue",
         "abort",
+        "writers",
         # the discovery routes (api/brains.py)
         "tags",
         "publish",
@@ -187,14 +196,25 @@ class JobView(BaseModel):
     brain: str
     actor: str
     state: Literal["queued", "running", "succeeded", "failed", "cancelled"]
-    stage: str
+    stage: str = Field(
+        description="What the job is doing; `interrupted` when a restart ended it."
+    )
     cancellable: bool
     created_at: str
     started_at: str | None = None
     finished_at: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)
     result: dict[str, Any] | None = None
-    error: dict[str, Any] | None = None
+    error: dict[str, Any] | None = Field(
+        default=None,
+        description="`{code, message, detail}`. Besides the HTTP codes, a job may "
+        "end with `cancelled` or `interrupted` (the service restarted while it ran; "
+        "`detail.passed_commit_point` says whether it may have changed anything).",
+    )
+
+
+class JobList(BaseModel):
+    jobs: list[JobView]
 
 
 class CreateBrainRequest(BaseModel):
@@ -234,9 +254,26 @@ class CollaboratorIn(BaseModel):
     model: str | None = Field(default=None, description="The model this party ran.")
 
 
+class InlineEvidence(BaseModel):
+    data_base64: str = Field(description="The source's bytes, base64-encoded.")
+    media_type: str = Field(min_length=1)
+    filename: str | None = None
+    origin: str | None = Field(
+        default=None, description="Where the source came from (recorded)."
+    )
+
+
 class CommitRequest(BaseModel):
-    source: str = Field(
-        description="The canonical evidence block the candidates derive from."
+    source: str | None = Field(
+        default=None,
+        description="The canonical evidence block the candidates derive from. "
+        "Exactly one of `source` and `evidence_inline`.",
+    )
+    evidence_inline: InlineEvidence | None = Field(
+        default=None,
+        description="The source's bytes, registered only if the commit goes ahead "
+        "(a rejection or dry run writes nothing). Candidates may cite it as "
+        "`$source`. Exactly one of `source` and `evidence_inline`.",
     )
     candidates: list[CandidateIn] = Field(min_length=1)
     producer: ProducerIn | None = Field(
@@ -300,15 +337,41 @@ class ConvergeRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+_SETTLE_BRANCH = (
+    "The branch the client believes the convergence is open on; `usage` if it is "
+    "open on another."
+)
+
+
 class ResolutionRequest(BaseModel):
     block: str
     kind: Literal["admit", "reject", "prefer"]
     prefer: str | None = None
     reason: str | None = None
+    branch: str | None = Field(default=None, description=_SETTLE_BRANCH)
 
 
 class ReasonRequest(BaseModel):
     reason: str | None = None
+    branch: str | None = Field(default=None, description=_SETTLE_BRANCH)
+
+
+class SettleRequest(BaseModel):
+    branch: str | None = Field(default=None, description=_SETTLE_BRANCH)
+
+
+class WritersRequest(BaseModel):
+    writers: list[str] = Field(
+        description="Actor ids (an address, or a namespaced name such as "
+        "`sso.example.com/<sub>`) who may write besides the owner; replaces the list."
+    )
+
+
+class WritersView(BaseModel):
+    reference: str
+    owner: str | None = Field(description="The brain's creator, an implicit writer.")
+    writers: list[str]
+    access: Literal["owners", "open"]
 
 
 class _Open(BaseModel):
@@ -346,12 +409,21 @@ class BranchList(_Open):
 
 class OpenConvergence(_Open):
     open: bool
-    theirs: str | None = None
+    theirs: str | None = Field(
+        default=None,
+        description="What is being joined, as the client named it when known "
+        "(else the snapshot, `theirs_snapshot`).",
+    )
+    theirs_snapshot: str | None = None
     strategy: str | None = None
     reason: str | None = None
-    actor: str | None = None
+    actor: str | None = Field(default=None, description="Who opened it.")
+    started_at: str | None = None
     head: str | None = None
-    branch: str | None = None
+    branch: str | None = Field(
+        default=None,
+        description="The branch it is open on. It blocks writes to every branch.",
+    )
     resolutions: int | None = None
 
 
@@ -373,6 +445,16 @@ class BrainStatus(_Open):
     created_at: str | None = None
     created_by: str | None = None
     imported_from: str | None = None
+    owner: str | None = Field(
+        default=None, description="Who created it; may always write it."
+    )
+    writers: list[str] = Field(
+        default_factory=list, description="Who else may write it."
+    )
+    access: Literal["owners", "open"] | None = None
+    writable: bool | None = Field(
+        default=None, description="Whether the caller may write it."
+    )
     governed: bool
     read_only: bool
     branch: str
@@ -541,11 +623,24 @@ class CommitResponse(_Open):
     snapshot: str | None = None
     roots: dict[str, str] | None = None
     branch: str | None = None
+    source: str | None = Field(
+        default=None,
+        description="With `evidence_inline`: the canonical block it is (or would be).",
+    )
+    evidence_duplicate: bool | None = Field(
+        default=None,
+        description="With `evidence_inline`: the brain already held those bytes.",
+    )
 
 
 class ConvergenceView(_Open):
     open: bool
     branch: str | None = None
+    actor: str | None = None
+    theirs: str | None = None
+    strategy: str | None = None
+    reason: str | None = None
+    started_at: str | None = None
     resolved: bool | None = None
     unresolved: list[str] | None = None
     removals_accepted: bool | None = None
@@ -575,11 +670,17 @@ def get_service(request: Request) -> LifecycleService:
             REFUSED_POLICY,
             "this replica holds no working store (GBMS_STORE_ROOT is unset); "
             "writes go to the writer replica",
+            detail={"replica": "reader"},
         )
     return service
 
 
 Service = Annotated[LifecycleService, Depends(get_service)]
+
+
+def who(principal: Principal, settings: Settings) -> tuple[Actor, bool]:
+    """The actor a write is attributed to, and whether the caller is an admin."""
+    return actor_for(principal, settings), principal.has_scope(ADMIN)
 
 
 def _job_response(job: Job) -> JSONResponse:
@@ -687,6 +788,7 @@ async def create_brain(
         title=body.title,
         description=body.description,
     )
+    status["writable"] = True
     response.headers["Location"] = f"/v1/brains/{status['reference']}"
     return status
 
@@ -860,6 +962,7 @@ async def register_evidence(
             handle,
             data,
             actor=actor_for(principal, settings),
+            admin=principal.has_scope(ADMIN),
             media_type=_form_str(form.get("media_type"))
             or file.content_type
             or "application/octet-stream",
@@ -874,7 +977,7 @@ async def register_evidence(
 
 @router.post(
     "/{brain_ref:path}/commits",
-    responses=ERRORS,
+    responses=UPLOAD_ERRORS,
     response_model=CommitResponse,
     response_model_exclude_unset=True,
 )
@@ -892,12 +995,35 @@ async def commit(
     ``dry_run`` returns every verdict and writes nothing. A commit whose
     candidates did not all validate is ``rejected_candidates`` (422) with the
     report; otherwise the committed blocks and the new snapshot.
+
+    The source is either ``source`` (evidence already registered) or
+    ``evidence_inline`` (its bytes, base64): then validation runs against the
+    brain as it would be with the evidence added, and the evidence is
+    registered only if the commit goes ahead, under the same lock and the same
+    ``If-Match`` check -- a rejection or dry run leaves the brain untouched.
+    Candidates cite inline evidence as ``$source``; the response names it
+    (``source``, ``evidence_duplicate``). Inline evidence larger than
+    ``GBMS_STORE_MAX_EVIDENCE_BYTES`` (decoded) is ``usage`` (413).
     """
+    if (body.source is None) == (body.evidence_inline is None):
+        raise LifecycleError(
+            USAGE, "give exactly one of `source` and `evidence_inline`"
+        )
+    evidence: bytes | None = None
+    inline = body.evidence_inline
+    if inline is not None:
+        evidence = decode_inline_evidence(
+            inline.data_base64, settings.store_max_evidence_bytes
+        )
     handle = service.handle(brain_ref)
     result = await service.commit(
         handle,
         actor=actor_for(principal, settings),
+        admin=principal.has_scope(ADMIN),
         source=body.source,
+        evidence=evidence,
+        evidence_media_type=inline.media_type if inline else None,
+        evidence_origin=(inline.origin or inline.filename) if inline else None,
         candidates=[c.model_dump(exclude_none=True) for c in body.candidates],
         producer=body.producer.model_dump(exclude_none=True) if body.producer else None,
         allowed=list(body.allowed) if body.allowed is not None else None,
@@ -914,6 +1040,43 @@ async def commit(
     if not body.dry_run:
         response.status_code = 201
     return result
+
+
+# --------------------------------------------------------------------------- #
+# Who may write
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/{brain_ref:path}/writers", response_model=WritersView, responses=ERRORS)
+async def get_writers(
+    brain_ref: str, principal: ReadPrincipal, service: Service
+) -> dict[str, Any]:
+    """Who may write the brain: its owner (creator) and its writers.
+
+    ``access`` is ``GBMS_BRAIN_ACCESS``: under ``open`` any ``brains:write``
+    holder may write any brain and the list is not enforced.
+    """
+    return service.writers(service.handle(brain_ref))
+
+
+@router.put("/{brain_ref:path}/writers", response_model=WritersView, responses=ERRORS)
+async def put_writers(
+    brain_ref: str,
+    body: WritersRequest,
+    principal: GrantPrincipal,
+    service: Service,
+    settings: Settings = Depends(get_settings),  # noqa: B008
+) -> dict[str, Any]:
+    """Replace who besides the owner may write the brain.
+
+    Only the brain's owner or a ``brains:admin`` caller may (``refused_policy``
+    otherwise); an id that is not an address or a namespaced name is ``usage``.
+    """
+    handle = service.handle(brain_ref)
+    actor, admin = who(principal, settings)
+    return await asyncio.to_thread(
+        service.set_writers, handle, body.writers, actor=actor, admin=admin
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -960,6 +1123,7 @@ async def push_branch(
         handle,
         name,
         actor=actor_for(principal, settings),
+        admin=principal.has_scope(ADMIN),
         force=bool(body and body.force),
         if_match=if_match,
     )
@@ -982,6 +1146,7 @@ async def create_branch(
         handle,
         body.name,
         actor=actor_for(principal, settings),
+        admin=principal.has_scope(ADMIN),
         start=body.start,
         if_match=if_match,
     )
@@ -1003,6 +1168,7 @@ async def delete_branch(
         handle,
         name,
         actor=actor_for(principal, settings),
+        admin=principal.has_scope(ADMIN),
         force=force,
         if_match=if_match,
     )
@@ -1021,6 +1187,7 @@ async def pull(
     job = service.pull(
         handle,
         actor=actor_for(principal, settings),
+        admin=principal.has_scope(ADMIN),
         tag=body.tag if body else None,
         branch=body.branch if body else None,
         if_match=if_match,
@@ -1051,6 +1218,7 @@ async def converge(
     job = service.converge(
         handle,
         actor=actor_for(principal, settings),
+        admin=principal.has_scope(ADMIN),
         source=body.from_,
         into=body.into,
         strategy=body.strategy,
@@ -1088,10 +1256,12 @@ async def resolve(
     return await service.resolve(
         handle,
         actor=actor_for(principal, settings),
+        admin=principal.has_scope(ADMIN),
         block=body.block,
         kind=body.kind,
         prefer=body.prefer,
         reason=body.reason,
+        branch=body.branch,
         if_match=if_match,
     )
 
@@ -1109,7 +1279,9 @@ async def accept_removals(
     return await service.accept_removals(
         handle,
         actor=actor_for(principal, settings),
+        admin=principal.has_scope(ADMIN),
         reason=body.reason if body else None,
+        branch=body.branch if body else None,
         if_match=if_match,
     )
 
@@ -1119,13 +1291,23 @@ async def continue_convergence(
     brain_ref: str,
     principal: WritePrincipal,
     service: Service,
+    body: SettleRequest | None = None,
     if_match: IfMatch = None,
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> dict[str, Any]:
-    """Conclude a convergence whose questions are answered (``needs_human`` if not)."""
+    """Conclude a convergence whose questions are answered (``needs_human`` if not).
+
+    Only whoever opened it, the brain's owner or a ``brains:admin`` caller may
+    settle a convergence (``GBMS_BRAIN_ACCESS=owners``).
+    """
     handle = service.handle(brain_ref)
+    actor, admin = who(principal, settings)
     return await service.continue_convergence(
-        handle, actor=actor_for(principal, settings), if_match=if_match
+        handle,
+        actor=actor,
+        admin=admin,
+        branch=body.branch if body else None,
+        if_match=if_match,
     )
 
 
@@ -1134,12 +1316,19 @@ async def abort_convergence(
     brain_ref: str,
     principal: WritePrincipal,
     service: Service,
+    body: SettleRequest | None = None,
     if_match: IfMatch = None,
     settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> dict[str, Any]:
+    """Abandon the open convergence; the brain is left as it was before it."""
     handle = service.handle(brain_ref)
+    actor, admin = who(principal, settings)
     return await service.abort_convergence(
-        handle, actor=actor_for(principal, settings), if_match=if_match
+        handle,
+        actor=actor,
+        admin=admin,
+        branch=body.branch if body else None,
+        if_match=if_match,
     )
 
 
@@ -1208,6 +1397,7 @@ async def import_brain(
                 brain_ref,
                 archive,
                 actor=actor,
+                admin=principal.has_scope(ADMIN),
                 default_tag=_form_str(form.get("default_tag")),
                 title=_form_str(form.get("title")) or "",
                 description=_form_str(form.get("description")) or "",
@@ -1223,6 +1413,7 @@ async def import_brain(
     job = service.import_from_registry(
         brain_ref,
         actor=actor,
+        admin=principal.has_scope(ADMIN),
         tag=body.tag,
         source=body.source,
         default_tag=body.default_tag,
@@ -1259,28 +1450,53 @@ async def _spool(upload: Any, settings: Settings, service: LifecycleService) -> 
 # --------------------------------------------------------------------------- #
 
 
-@jobs_router.get("", responses=ERRORS)
+def _visible_job(
+    service: LifecycleService, job_id: str, principal: Principal, settings: Settings
+) -> Job:
+    """The job if the caller may see it: its own, or any with ``brains:admin``.
+
+    Someone else's job is ``not_found``, as if it did not exist.
+    """
+    job = service.jobs.get(job_id)
+    if principal.has_scope(ADMIN) or job.actor == actor_for(principal, settings).id:
+        return job
+    raise LifecycleError(NOT_FOUND, f"no job {job_id!r}")
+
+
+@jobs_router.get("", response_model=JobList, responses=ERRORS)
 async def list_jobs(
-    principal: WritePrincipal,
+    principal: JobsPrincipal,
     service: Service,
     brain: Annotated[str | None, Query(description="Only jobs on this brain")] = None,
+    settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> dict[str, Any]:
+    """The caller's jobs, newest first (every job with ``brains:admin``)."""
     reference = service.repository(brain)[0] if brain else None
-    return {"jobs": [job.view() for job in service.jobs.list(brain=reference)]}
+    actor = None if principal.has_scope(ADMIN) else actor_for(principal, settings).id
+    jobs = service.jobs.list(brain=reference, actor=actor)
+    return {"jobs": [job.view() for job in jobs]}
 
 
 @jobs_router.get("/{job_id}", response_model=JobView, responses=ERRORS)
 async def get_job(
-    job_id: str, principal: WritePrincipal, service: Service
+    job_id: str,
+    principal: JobsPrincipal,
+    service: Service,
+    settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> dict[str, Any]:
-    return service.jobs.get(job_id).view()
+    """One of the caller's jobs (any job with ``brains:admin``)."""
+    return _visible_job(service, job_id, principal, settings).view()
 
 
 @jobs_router.post("/{job_id}/cancel", response_model=JobView, responses=ERRORS)
 async def cancel_job(
-    job_id: str, principal: WritePrincipal, service: Service
+    job_id: str,
+    principal: JobsPrincipal,
+    service: Service,
+    settings: Settings = Depends(get_settings),  # noqa: B008
 ) -> dict[str, Any]:
     """Cancel a job before its point of no return (``usage`` after it)."""
+    _visible_job(service, job_id, principal, settings)
     job = service.jobs.cancel(job_id)
     if job.task is not None:
         await asyncio.sleep(0)

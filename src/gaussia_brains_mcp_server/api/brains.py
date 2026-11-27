@@ -20,9 +20,11 @@ from gaussia_brains_mcp_server.auth.http import (
     require_scopes,
 )
 from gaussia_brains_mcp_server.auth.principal import Principal
-from gaussia_brains_mcp_server.auth.scopes import CATALOG, PUBLISH, READ, WRITE
+from gaussia_brains_mcp_server.auth.scopes import ADMIN, CATALOG, PUBLISH, READ, WRITE
 from gaussia_brains_mcp_server.catalog import catalog
 from gaussia_brains_mcp_server.config import Settings, get_settings
+from gaussia_brains_mcp_server.lifecycle.errors import LifecycleError
+from gaussia_brains_mcp_server.lifecycle.identity import actor_for
 
 router = APIRouter(prefix="/v1/brains", tags=["brains"])
 
@@ -42,6 +44,14 @@ class ReindexRequest(BaseModel):
     refs: list[str] = Field(default_factory=list)
 
 
+def _caller_id(principal: Principal, settings: Settings) -> str | None:
+    """The caller's actor id, or ``None`` when the token names no usable identity."""
+    try:
+        return actor_for(principal, settings).id
+    except LifecycleError:
+        return None
+
+
 def _mcp_base_url(request: Request, settings: Settings) -> str:
     """Build the absolute MCP path prefix for catalog links."""
     base = str(request.base_url).rstrip("/")
@@ -51,10 +61,10 @@ def _mcp_base_url(request: Request, settings: Settings) -> str:
     return f"{base}{mcp_path}"
 
 
-@router.get("")
+@router.get("", responses=ERRORS)
 async def list_brains(
     request: Request,
-    principal: Annotated[Principal, Depends(require_scopes(CATALOG))],
+    principal: Annotated[Principal, Depends(require_any_scope(CATALOG, WRITE))],
     namespace: Annotated[
         str | None, Query(description="Namespace index to read")
     ] = None,
@@ -65,30 +75,35 @@ async def list_brains(
     held: Annotated[
         bool,
         Query(
-            description="List the brains held in this service's working store instead"
+            description="List the brains held in this service's working store "
+            "instead (`brains:catalog` or `brains:write`). Under "
+            "GBMS_BRAIN_ACCESS=owners only those the caller may write (every one "
+            "with `brains:admin`), by reference; each entry says `writable`."
         ),
     ] = False,
     settings: Settings = Depends(get_settings),  # noqa: B008
-) -> dict[str, Any]:
-    """List brains from namespace indexes with verified signer information."""
+) -> Any:
+    """List brains from namespace indexes with verified signer information.
+
+    Needs ``brains:catalog``; ``held=true`` also accepts ``brains:write``.
+    """
     if held:
         service = getattr(request.app.state, "lifecycle", None)
-        metas = service.store.list() if service is not None else []
-        return {
-            "entries": [
-                {
-                    "reference": m.reference,
-                    "default_tag": m.default_tag,
-                    "title": m.title,
-                    "description": m.description,
-                    "created_at": m.created_at,
-                    "created_by": m.created_by,
-                    "imported_from": m.imported_from,
-                }
-                for m in metas
-            ],
-            "next_cursor": None,
-        }
+        if service is None:
+            return {"entries": [], "next_cursor": None}
+        try:
+            return await asyncio.to_thread(
+                service.list_held,
+                actor_id=_caller_id(principal, settings),
+                admin=principal.has_scope(ADMIN),
+                can_write=principal.has_scope(WRITE),
+                cursor=cursor,
+                limit=limit,
+            )
+        except LifecycleError as exc:
+            return error_response(request, exc)
+    if not principal.has_scope(CATALOG):
+        raise insufficient_scope({CATALOG}, f"Missing scopes: {[CATALOG]}")
     cat = catalog(settings)
     namespaces = (
         [namespace] if namespace else list(settings.effective_catalog_namespaces())
@@ -224,6 +239,11 @@ async def _brain_detail(
             handle = None
         if handle is not None:
             status = await asyncio.to_thread(service.status, handle, branch)
+            status["writable"] = principal.has_scope(WRITE) and service.may_write(
+                handle.meta,
+                _caller_id(principal, settings),
+                principal.has_scope(ADMIN),
+            )
             if status.get("head"):
                 response.headers["ETag"] = f'"{status["head"]}"'
             return status

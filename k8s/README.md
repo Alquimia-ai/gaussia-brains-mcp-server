@@ -39,12 +39,14 @@ with `refused_policy`.
 
 Read replicas serve **published** brains only (proposal §17.2): they pull from the registry, so a
 brain that exists only in the writer's working store (created or committed but not pushed) is not
-visible there. Route accordingly:
+visible there. Every response carries `X-GBMS-Role: writer` or `reader`, so a misrouted request is
+easy to spot (a reader's lifecycle refusal also says `detail.replica: "reader"`). Route
+accordingly:
 
 | Traffic | Service |
 |---------|---------|
 | Lifecycle writes: `POST`/`DELETE` under `/v1/brains` (create, evidence, commits, branches, push, pull, converge, import, publish/unpublish) | `gaussia-brains-mcp-server` (writer) |
-| `/v1/jobs` (job status lives in the writer's memory) | writer |
+| `/v1/jobs` (job records live on the writer's volume) | writer |
 | Browsing a working-store brain (Ledger: `GET` of commits, history, blocks; search on an unpushed brain) | writer |
 | MCP (`/mcp/<brain-ref>`), discovery (`GET /v1/brains`), search of published brains | `gaussia-brains-mcp-server-read` |
 
@@ -54,8 +56,24 @@ logical resource, so a token's audience is valid on either. Point Studio's `BRAI
 at the read service to keep agent traffic off the writer.
 
 Back up the PVC like any database volume: it is the working copy of record until a brain is
-pushed. Push, pull, converge and import run as in-memory jobs; a restart cancels running ones
-safely (blobs are content-addressed and pointers move last) and forgets finished ones.
+pushed. Push, pull, converge and import run as jobs whose records are kept on the same volume
+(`$GBMS_STORE_ROOT/.jobs`, one JSON file per job, the newest `GBMS_JOBS_MAX_RETAINED`).
+
+### Deploys and restarts
+
+`strategy: Recreate` means **every deploy or restart of the writer is a short write outage**:
+the old pod stops before the new one starts, and in between lifecycle writes fail (the read
+replicas keep serving MCP and discovery). Plan deploys accordingly.
+
+On SIGTERM the writer stops taking new jobs (`502 registry_unavailable`,
+`detail.restarting: true` — clients retry shortly), cancels jobs that have not reached their
+point of no return, and waits up to `GBMS_SHUTDOWN_GRACE_SECONDS` (default 25) for the ones that
+have. `terminationGracePeriodSeconds: 60` leaves room for that before Kubernetes kills the pod.
+Jobs survive as records: after the restart, `GET /v1/jobs/{id}` still answers, and a job that
+was cut off reports `state: failed`, `stage: interrupted`, `error.code: interrupted` with
+`error.detail.passed_commit_point` — `false` means nothing was changed (run it again), `true`
+means it may have completed (re-read the brain's status before retrying). Nothing is left
+half-written either way: blobs are content-addressed and pointers move last.
 
 ## How Alquimia reaches it
 
@@ -81,7 +99,9 @@ one endpoint per brain. Brains are connected through Studio's Brains flow instea
 the issuer is Keycloak: give the client an audience mapper for `GBMS_AUTH_RESOURCE`, and map realm
 roles to scopes in `GBMS_AUTH_ISSUERS` (`role_scopes`). Ledger users need `brain-writer` →
 `brains:write` (plus `brains:catalog`/`brains:read` to browse and search); writes are attributed
-to the token's `email` (`GBMS_ACTOR_CLAIM`). Agents need `brains:read`.
+to the token's `email` (`GBMS_ACTOR_CLAIM`). With `GBMS_BRAIN_ACCESS=owners` (the default) a
+user writes only the brains they created or were made a writer of; map an operator role to
+`brains:admin` to write any brain, grant access and see every job. Agents need `brains:read`.
 
 For MCP, the runtime presents the credential named by Studio's `BRAINS_MCP_AUTH_SECRET_REF` as a
 bearer token, so that vault value has to be a token your issuer accepts for this resource

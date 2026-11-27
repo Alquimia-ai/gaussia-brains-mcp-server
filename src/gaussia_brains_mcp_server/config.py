@@ -12,7 +12,7 @@ Nested values (the trusted issuer list) are given as JSON, e.g.::
                                          "brain-editor": ["brains:write", "brains:publish"]}}]'
 
 The scopes this service authorizes on are ``brains:read``, ``brains:catalog``,
-``brains:write`` and ``brains:publish``.
+``brains:write``, ``brains:publish`` and ``brains:admin``.
 """
 
 from __future__ import annotations
@@ -235,7 +235,16 @@ class Settings(BaseSettings):
     #: Largest uploaded OCI layout (tar or tar.gz) accepted for import, in bytes.
     store_max_import_bytes: int = Field(default=2 * 1024 * 1024 * 1024, ge=1)
     #: Finished jobs kept for ``GET /v1/jobs/{id}``, oldest dropped first.
+    #: Job records are persisted under ``<store_root>/.jobs`` and survive a restart.
     jobs_max_retained: int = Field(default=500, ge=1)
+    #: On shutdown, seconds to wait for jobs already past their point of no
+    #: return before they are cancelled (jobs before it are cancelled at once).
+    #: Keep it below the pod's ``terminationGracePeriodSeconds``.
+    shutdown_grace_seconds: float = Field(default=25.0, ge=0)
+    #: Who may write a brain in the working store. ``owners``: its creator and
+    #: the writers it lists (``PUT /v1/brains/{ref}/writers``), or a
+    #: ``brains:admin`` token. ``open``: any ``brains:write`` holder.
+    brain_access: Literal["owners", "open"] = "owners"
 
     # ── Who a write is attributed to ─────────────────────────────────────
     #: Token claim holding the human's address (lower-cased before use).

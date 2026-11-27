@@ -7,8 +7,10 @@ indexed -- not where they are edited.
 Layout of ``GBMS_STORE_ROOT``::
 
     <root>/
+      .jobs/<id>.json                one record per job (see lifecycle/jobs.py)
       <sha256(reference)[:32]>/      one directory per brain
-        brain.json                   reference, default tag, title, who created it
+        brain.json                   reference, default tag, title, who created it,
+                                     who may write it, the open convergence
         layout/                      the OCI image layout pyboltzmann writes
         .write.lock                  advisory lock held for the duration of a write
 
@@ -127,9 +129,24 @@ class BrainMeta:
     created_at: str = field(default_factory=_now)
     created_by: str = ""
     imported_from: str | None = None
+    #: Actor ids (lowercase) besides ``created_by`` who may write the brain
+    #: under ``GBMS_BRAIN_ACCESS=owners``.
+    writers: list[str] = field(default_factory=list)
+    #: What the service knows about the open convergence that pyboltzmann does
+    #: not record (the source as the client named it, when it started); kept
+    #: while a convergence this service left open is unresolved.
+    convergence: dict[str, Any] | None = None
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
+
+    def owners(self) -> list[str]:
+        """Who may write: the creator first, then the writers, without repeats."""
+        found: list[str] = []
+        for actor in (self.created_by, *self.writers):
+            if actor and actor not in found:
+                found.append(actor)
+        return found
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> BrainMeta:
@@ -218,6 +235,8 @@ class BrainHandle:
         #: Set (under the write lock) when the brain's directory was removed;
         #: a write queued behind the removal is refused rather than recreating it.
         self.discarded = False
+        #: Serializes changes to :attr:`meta` and its file (writers, convergence).
+        self._meta_lock = threading.Lock()
 
     # -- paths ----------------------------------------------------------------- #
 
@@ -234,6 +253,13 @@ class BrainHandle:
 
     def save_meta(self) -> None:
         _write_json_atomic(self.directory / META_FILE, self.meta.to_json())
+
+    def update_meta(self, change: Callable[[BrainMeta], None]) -> BrainMeta:
+        """Apply *change* to the meta and persist it, one change at a time."""
+        with self._meta_lock:
+            change(self.meta)
+            self.save_meta()
+            return self.meta
 
     # -- pointers (no lock, no brain) ------------------------------------------ #
 

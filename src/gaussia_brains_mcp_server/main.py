@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import anyio
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from loguru import logger
-from starlette.types import Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from gaussia_brains_mcp_server import __version__
 from gaussia_brains_mcp_server.api.brains import router as brains_router
@@ -60,6 +61,50 @@ async def _send_json(
         {"type": "http.response.start", "status": status_code, "headers": all_headers}
     )
     await send({"type": "http.response.body", "body": payload})
+
+
+ROLE_HEADER = b"x-gbms-role"
+#: Where job records live under the store root (one JSON file per job).
+JOBS_DIR = ".jobs"
+
+
+class RoleHeaderMiddleware:
+    """Adds ``X-GBMS-Role: writer|reader`` to every HTTP response.
+
+    ``writer`` when this replica holds the working store (``GBMS_STORE_ROOT``),
+    ``reader`` otherwise, so a client can tell which replica answered. Pure
+    ASGI, so streamed MCP responses pass through untouched.
+    """
+
+    def __init__(self, app: ASGIApp, fastapi_app: FastAPI) -> None:
+        self.app = app
+        self.fastapi_app = fastapi_app
+
+    def _role(self) -> bytes:
+        state = self.fastapi_app.state
+        if getattr(state, "lifecycle", None) is not None:
+            return b"writer"
+        settings = getattr(state, "settings", None)
+        return b"writer" if settings is not None and settings.store_root else b"reader"
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        role = self._role()
+
+        async def send_with_role(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = [
+                    (k, v)
+                    for k, v in message.get("headers", [])
+                    if k.lower() != ROLE_HEADER
+                ]
+                headers.append((ROLE_HEADER, role))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_role)
 
 
 class McpDispatchApp:
@@ -141,7 +186,13 @@ async def lifespan(app: FastAPI) -> Any:
     app.state.brain_cache = BrainCache(settings)
     app.state.mcp_apps = {}  # type: ignore[misc]
     app.state.mcp_apps_lock = asyncio.Lock()
-    jobs = JobRunner(max_retained=settings.jobs_max_retained)
+    # Job records persist on the writer's volume; a read replica keeps none.
+    jobs = JobRunner(
+        max_retained=settings.jobs_max_retained,
+        directory=Path(settings.store_root) / JOBS_DIR if settings.store_root else None,
+    )
+    jobs.recover()
+    app.state.jobs = jobs
     app.state.lifecycle = None
     if settings.store_root:
         app.state.lifecycle = LifecycleService(
@@ -160,7 +211,13 @@ async def lifespan(app: FastAPI) -> Any:
     try:
         async with anyio.create_task_group() as tg:
             app.state.mcp_task_group = tg
-            yield
+            try:
+                yield
+            finally:
+                # Refuse new jobs, cancel those before their point of no
+                # return, give the rest the grace period (decision: jobs
+                # survive a restart as records).
+                await jobs.aclose(settings.shutdown_grace_seconds)
     finally:
         await jobs.aclose()
 
@@ -192,6 +249,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(jobs_router)
     app.include_router(brains_router)
     app.mount(mcp_path, McpDispatchApp(app))
+    app.add_middleware(RoleHeaderMiddleware, fastapi_app=app)
 
     @app.get("/healthz")
     async def _healthz() -> dict[str, Any]:

@@ -296,6 +296,21 @@
         "additionalProperties": true,
         "description": "A brain held in the working store, at one branch.",
         "properties": {
+          "access": {
+            "anyOf": [
+              {
+                "enum": [
+                  "owners",
+                  "open"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Access"
+          },
           "block_count": {
             "default": 0,
             "title": "Block Count",
@@ -406,6 +421,18 @@
             "title": "Modules",
             "type": "object"
           },
+          "owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Who created it; may always write it.",
+            "title": "Owner"
+          },
           "publication": {
             "anyOf": [
               {
@@ -428,6 +455,26 @@
             "default": "",
             "title": "Title",
             "type": "string"
+          },
+          "writable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Whether the caller may write it.",
+            "title": "Writable"
+          },
+          "writers": {
+            "description": "Who else may write it.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Writers",
+            "type": "array"
           }
         },
         "required": [
@@ -736,6 +783,17 @@
             "title": "Dry Run",
             "type": "boolean"
           },
+          "evidence_inline": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InlineEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The source's bytes, registered only if the commit goes ahead (a rejection or dry run writes nothing). Candidates may cite it as `$source`. Exactly one of `source` and `evidence_inline`."
+          },
           "instructions": {
             "anyOf": [
               {
@@ -773,9 +831,16 @@
             "title": "Requirements"
           },
           "source": {
-            "description": "The canonical evidence block the candidates derive from.",
-            "title": "Source",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The canonical evidence block the candidates derive from. Exactly one of `source` and `evidence_inline`.",
+            "title": "Source"
           },
           "task_id": {
             "anyOf": [
@@ -790,7 +855,6 @@
           }
         },
         "required": [
-          "source",
           "candidates"
         ],
         "title": "CommitRequest",
@@ -828,6 +892,18 @@
           "dry_run": {
             "title": "Dry Run",
             "type": "boolean"
+          },
+          "evidence_duplicate": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "With `evidence_inline`: the brain already held those bytes.",
+            "title": "Evidence Duplicate"
           },
           "head": {
             "anyOf": [
@@ -881,6 +957,18 @@
               }
             ],
             "title": "Snapshot"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "With `evidence_inline`: the canonical block it is (or would be).",
+            "title": "Source"
           }
         },
         "required": [
@@ -972,6 +1060,17 @@
       "ConvergenceView": {
         "additionalProperties": true,
         "properties": {
+          "actor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor"
+          },
           "branch": {
             "anyOf": [
               {
@@ -986,6 +1085,17 @@
           "open": {
             "title": "Open",
             "type": "boolean"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
           },
           "removals_accepted": {
             "anyOf": [
@@ -1009,8 +1119,41 @@
             ],
             "title": "Resolved"
           },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
           "status": {
             "title": "Status"
+          },
+          "strategy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strategy"
+          },
+          "theirs": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Theirs"
           },
           "unresolved": {
             "anyOf": [
@@ -1187,6 +1330,65 @@
         "title": "HistoryPage",
         "type": "object"
       },
+      "InlineEvidence": {
+        "properties": {
+          "data_base64": {
+            "description": "The source's bytes, base64-encoded.",
+            "title": "Data Base64",
+            "type": "string"
+          },
+          "filename": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filename"
+          },
+          "media_type": {
+            "minLength": 1,
+            "title": "Media Type",
+            "type": "string"
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the source came from (recorded).",
+            "title": "Origin"
+          }
+        },
+        "required": [
+          "data_base64",
+          "media_type"
+        ],
+        "title": "InlineEvidence",
+        "type": "object"
+      },
+      "JobList": {
+        "properties": {
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/JobView"
+            },
+            "title": "Jobs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "jobs"
+        ],
+        "title": "JobList",
+        "type": "object"
+      },
       "JobView": {
         "properties": {
           "actor": {
@@ -1215,6 +1417,7 @@
                 "type": "null"
               }
             ],
+            "description": "`{code, message, detail}`. Besides the HTTP codes, a job may end with `cancelled` or `interrupted` (the service restarted while it ran; `detail.passed_commit_point` says whether it may have changed anything).",
             "title": "Error"
           },
           "finished_at": {
@@ -1260,6 +1463,7 @@
             "title": "Result"
           },
           "stage": {
+            "description": "What the job is doing; `interrupted` when a restart ended it.",
             "title": "Stage",
             "type": "string"
           },
@@ -1330,6 +1534,7 @@
                 "type": "null"
               }
             ],
+            "description": "Who opened it.",
             "title": "Actor"
           },
           "branch": {
@@ -1341,6 +1546,7 @@
                 "type": "null"
               }
             ],
+            "description": "The branch it is open on. It blocks writes to every branch.",
             "title": "Branch"
           },
           "head": {
@@ -1380,6 +1586,17 @@
             ],
             "title": "Resolutions"
           },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
           "strategy": {
             "anyOf": [
               {
@@ -1400,7 +1617,19 @@
                 "type": "null"
               }
             ],
+            "description": "What is being joined, as the client named it when known (else the snapshot, `theirs_snapshot`).",
             "title": "Theirs"
+          },
+          "theirs_snapshot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Theirs Snapshot"
           }
         },
         "required": [
@@ -1626,6 +1855,18 @@
       },
       "ReasonRequest": {
         "properties": {
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The branch the client believes the convergence is open on; `usage` if it is open on another.",
+            "title": "Branch"
+          },
           "reason": {
             "anyOf": [
               {
@@ -1695,6 +1936,18 @@
           "block": {
             "title": "Block",
             "type": "string"
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The branch the client believes the convergence is open on; `usage` if it is open on another.",
+            "title": "Branch"
           },
           "kind": {
             "enum": [
@@ -2025,6 +2278,24 @@
         "title": "SearchSource",
         "type": "object"
       },
+      "SettleRequest": {
+        "properties": {
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The branch the client believes the convergence is open on; `usage` if it is open on another.",
+            "title": "Branch"
+          }
+        },
+        "title": "SettleRequest",
+        "type": "object"
+      },
       "SnapshotRow": {
         "additionalProperties": true,
         "properties": {
@@ -2220,6 +2491,66 @@
         ],
         "title": "ValidationReport",
         "type": "object"
+      },
+      "WritersRequest": {
+        "properties": {
+          "writers": {
+            "description": "Actor ids (an address, or a namespaced name such as `sso.example.com/<sub>`) who may write besides the owner; replaces the list.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Writers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "writers"
+        ],
+        "title": "WritersRequest",
+        "type": "object"
+      },
+      "WritersView": {
+        "properties": {
+          "access": {
+            "enum": [
+              "owners",
+              "open"
+            ],
+            "title": "Access",
+            "type": "string"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The brain's creator, an implicit writer.",
+            "title": "Owner"
+          },
+          "reference": {
+            "title": "Reference",
+            "type": "string"
+          },
+          "writers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Writers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "reference",
+          "owner",
+          "writers",
+          "access"
+        ],
+        "title": "WritersView",
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -2259,7 +2590,7 @@
     },
     "/v1/brains": {
       "get": {
-        "description": "List brains from namespace indexes with verified signer information.",
+        "description": "List brains from namespace indexes with verified signer information.\n\nNeeds ``brains:catalog``; ``held=true`` also accepts ``brains:write``.",
         "operationId": "list_brains_v1_brains_get",
         "parameters": [
           {
@@ -2313,13 +2644,13 @@
             }
           },
           {
-            "description": "List the brains held in this service's working store instead",
+            "description": "List the brains held in this service's working store instead (`brains:catalog` or `brains:write`). Under GBMS_BRAIN_ACCESS=owners only those the caller may write (every one with `brains:admin`), by reference; each entry says `writable`.",
             "in": "query",
             "name": "held",
             "required": false,
             "schema": {
               "default": false,
-              "description": "List the brains held in this service's working store instead",
+              "description": "List the brains held in this service's working store instead (`brains:catalog` or `brains:write`). Under GBMS_BRAIN_ACCESS=owners only those the caller may write (every one with `brains:admin`), by reference; each entry says `writable`.",
               "title": "Held",
               "type": "boolean"
             }
@@ -2330,23 +2661,91 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Brains V1 Brains Get",
-                  "type": "object"
+                  "title": "Response List Brains V1 Brains Get"
                 }
               }
             },
             "description": "Successful Response"
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad Gateway"
           }
         },
         "security": [
@@ -3459,7 +3858,7 @@
     },
     "/v1/brains/{brain_ref}/commits": {
       "post": {
-        "description": "Validate the client's candidates and commit them, all or nothing.\n\n``dry_run`` returns every verdict and writes nothing. A commit whose\ncandidates did not all validate is ``rejected_candidates`` (422) with the\nreport; otherwise the committed blocks and the new snapshot.",
+        "description": "Validate the client's candidates and commit them, all or nothing.\n\n``dry_run`` returns every verdict and writes nothing. A commit whose\ncandidates did not all validate is ``rejected_candidates`` (422) with the\nreport; otherwise the committed blocks and the new snapshot.\n\nThe source is either ``source`` (evidence already registered) or\n``evidence_inline`` (its bytes, base64): then validation runs against the\nbrain as it would be with the evidence added, and the evidence is\nregistered only if the commit goes ahead, under the same lock and the same\n``If-Match`` check -- a rejection or dry run leaves the brain untouched.\nCandidates cite inline evidence as ``$source``; the response names it\n(``source``, ``evidence_duplicate``). Inline evidence larger than\n``GBMS_STORE_MAX_EVIDENCE_BYTES`` (decoded) is ``usage`` (413).",
         "operationId": "commit_v1_brains__brain_ref__commits_post",
         "parameters": [
           {
@@ -3560,6 +3959,16 @@
               }
             },
             "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The body is larger than accepted."
           },
           "422": {
             "content": {
@@ -3866,6 +4275,7 @@
     },
     "/v1/brains/{brain_ref}/convergence/abort": {
       "post": {
+        "description": "Abandon the open convergence; the brain is left as it was before it.",
         "operationId": "abort_convergence_v1_brains__brain_ref__convergence_abort_post",
         "parameters": [
           {
@@ -3896,6 +4306,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/SettleRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {
@@ -4157,7 +4584,7 @@
     },
     "/v1/brains/{brain_ref}/convergence/continue": {
       "post": {
-        "description": "Conclude a convergence whose questions are answered (``needs_human`` if not).",
+        "description": "Conclude a convergence whose questions are answered (``needs_human`` if not).\n\nOnly whoever opened it, the brain's owner or a ``brains:admin`` caller may\nsettle a convergence (``GBMS_BRAIN_ACCESS=owners``).",
         "operationId": "continue_convergence_v1_brains__brain_ref__convergence_continue_post",
         "parameters": [
           {
@@ -4188,6 +4615,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/SettleRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {
@@ -5603,8 +6047,253 @@
         ]
       }
     },
+    "/v1/brains/{brain_ref}/writers": {
+      "get": {
+        "description": "Who may write the brain: its owner (creator) and its writers.\n\n``access`` is ``GBMS_BRAIN_ACCESS``: under ``open`` any ``brains:write``\nholder may write any brain and the list is not enforced.",
+        "operationId": "get_writers_v1_brains__brain_ref__writers_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "brain_ref",
+            "required": true,
+            "schema": {
+              "title": "Brain Ref",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WritersView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Writers",
+        "tags": [
+          "lifecycle"
+        ]
+      },
+      "put": {
+        "description": "Replace who besides the owner may write the brain.\n\nOnly the brain's owner or a ``brains:admin`` caller may (``refused_policy``\notherwise); an id that is not an address or a namespaced name is ``usage``.",
+        "operationId": "put_writers_v1_brains__brain_ref__writers_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "brain_ref",
+            "required": true,
+            "schema": {
+              "title": "Brain Ref",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WritersRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WritersView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Put Writers",
+        "tags": [
+          "lifecycle"
+        ]
+      }
+    },
     "/v1/jobs": {
       "get": {
+        "description": "The caller's jobs, newest first (every job with ``brains:admin``).",
         "operationId": "list_jobs_v1_jobs_get",
         "parameters": [
           {
@@ -5631,9 +6320,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Jobs V1 Jobs Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/JobList"
                 }
               }
             },
@@ -5733,6 +6420,7 @@
     },
     "/v1/jobs/{job_id}": {
       "get": {
+        "description": "One of the caller's jobs (any job with ``brains:admin``).",
         "operationId": "get_job_v1_jobs__job_id__get",
         "parameters": [
           {

@@ -13,6 +13,15 @@ and three service concerns put in:
 * **Read-only governance.** Signing and governance are out of scope for now
   (decision D10): a governed brain -- one whose history names a trust root --
   is served read-only, and every write to it is ``refused_policy``.
+* **Per-brain write access.** Under ``GBMS_BRAIN_ACCESS=owners`` (the default)
+  a brain is written only by its creator, the writers it lists, or a
+  ``brains:admin`` caller; anyone else is ``refused_policy``.
+* **One convergence per brain.** pyboltzmann keeps one head pointer per layout
+  and refuses every write and checkout while a reconciliation is open, so an
+  open convergence blocks writes to *every* branch of the brain. Such a write
+  is ``needs_human`` with ``detail.convergence`` naming the branch it is open
+  on, who opened it and what it joins; only that person, the brain's owner or
+  an administrator may settle it.
 
 The pyboltzmann calls are synchronous and CPU-bound, so they run in a worker
 thread while the brain's write lock is held -- through ``run_locked_thread``, so
@@ -26,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import shutil
 import tarfile
 import tempfile
@@ -46,15 +56,27 @@ from boltzmann import (
     Snapshot,
 )
 from boltzmann.blocks import Producer, ProducerKind
+from boltzmann.blocks.canonical import CanonicalBlock
 from boltzmann.branches import DEFAULT_BRANCH, branch_for_tag
 from boltzmann.exceptions import (
     BranchError,
+    ReconciliationBlockedError,
     ReconciliationHaltedError,
     ReferenceNotFoundError,
 )
 from boltzmann.identity.principal import is_actor_id
-from boltzmann.ingest import Candidate, CandidateSet, RegistrationRequest
-from boltzmann.module import Ledger
+from boltzmann.identity.serialization import parse_json_strict
+from boltzmann.ingest import (
+    PROPOSABLE_MEMORY_TYPES,
+    Candidate,
+    CandidateSet,
+    ProcessingTask,
+    RegistrationRequest,
+    TaskOperation,
+)
+from boltzmann.ingest.validation import validate as validate_candidates
+from boltzmann.module import Ledger, Module
+from boltzmann.reconcile import ReconcileState
 from boltzmann.store import OciLayoutStore
 from loguru import logger
 
@@ -88,6 +110,11 @@ from gaussia_brains_mcp_server.repo import parse_brain_ref
 from gaussia_brains_mcp_server.search import SearchInputError, search_brain
 
 MAX_PAGE = 200
+#: Where pyboltzmann records an open reconciliation (empty when none is open).
+RECONCILE_POINTER = "reconcile"
+#: What a candidate's ``evidence`` may say to cite the inline evidence of its commit.
+SOURCE_PLACEHOLDER = "$source"
+OWNERS = "owners"
 
 
 # --------------------------------------------------------------------------- #
@@ -196,6 +223,108 @@ def normalize_if_match(value: str | None) -> str | None:
     if value.startswith("W/"):
         value = value[2:]
     return value.strip('"') or None
+
+
+def canonical_block_for(data: bytes, request: RegistrationRequest) -> CanonicalBlock:
+    """The canonical block ``Brain.register(data, request)`` would write.
+
+    Mirrors pyboltzmann 0.10.1's ``Brain.register`` for a request without a
+    normalization pipeline (the only kind this service makes): the block names
+    the bytes' content address, media type and size. Nothing is stored.
+    ``tests/test_lifecycle_atomic.py`` pins that the ids agree.
+    """
+    if request.normalize_with is not None:
+        raise ValueError("a normalization pipeline changes the canonical block")
+    return CanonicalBlock(
+        blob=OciDigest.of(data),
+        media_type=request.media_type,
+        size=len(data),
+        normalized_view=None,
+    )
+
+
+def prospective_modules(
+    brain: Brain, block: CanonicalBlock
+) -> dict[MemoryType, Module]:
+    """The brain's modules as they would be with *block* registered; nothing is written.
+
+    Uses the public ``Module.with_blocks`` derivation, so the canonical
+    composition validation sees is exactly the one ``register`` would commit.
+    """
+    modules: dict[MemoryType, Module] = dict(brain.modules()) if brain.state() else {}
+    canonical = modules.get(MemoryType.CANONICAL)
+    if canonical is None:
+        canonical = Module(MemoryType.CANONICAL, brain.store)
+    if block.block_id not in canonical:
+        modules[MemoryType.CANONICAL] = canonical.with_blocks([block.block_id])
+    return modules
+
+
+def extraction_task(
+    source: BlockId,
+    *,
+    allowed: list[MemoryType] | None,
+    requirements: list[str] | None,
+    instructions: str | None,
+    task_id: str | None,
+) -> ProcessingTask:
+    """The task ``Brain.define_task`` returns, without requiring *source* to be held.
+
+    Mirrors pyboltzmann 0.10.1's defaults; pinned by a test against
+    ``define_task`` itself.
+    """
+    return ProcessingTask(
+        operation=TaskOperation.EXTRACT_KNOWLEDGE,
+        source=source,
+        allowed_memory_types=sorted(allowed or PROPOSABLE_MEMORY_TYPES),
+        requirements=list(requirements or ["cite source ranges", "do not invent"]),
+        instructions=instructions,
+        task_id=task_id,
+    )
+
+
+def _substitute_source(candidate: dict[str, Any], source: str) -> dict[str, Any]:
+    """Replace the ``$source`` placeholder in a candidate's citations."""
+
+    def swap(values: Any) -> Any:
+        if not isinstance(values, list):
+            return values
+        return [source if v == SOURCE_PLACEHOLDER else v for v in values]
+
+    out = dict(candidate)
+    out["evidence"] = swap(out.get("evidence"))
+    payload = out.get("payload")
+    if isinstance(payload, dict) and "evidence" in payload:
+        out["payload"] = {**payload, "evidence": swap(payload["evidence"])}
+    return out
+
+
+def decode_inline_evidence(data_base64: str, limit: int) -> bytes:
+    """The bytes of inline evidence: ``usage`` if not base64, ``usage``/413 past *limit*."""
+    stripped = "".join(data_base64.split())
+    if len(stripped) // 4 * 3 > limit + 3:
+        raise LifecycleError(
+            USAGE,
+            f"the inline evidence is larger than {limit} bytes",
+            detail={"limit": limit},
+            status=413,
+        )
+    try:
+        data = base64.b64decode(stripped, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise LifecycleError(
+            USAGE, "evidence_inline.data_base64 is not valid base64"
+        ) from exc
+    if len(data) > limit:
+        raise LifecycleError(
+            USAGE,
+            f"the inline evidence is larger than {limit} bytes",
+            detail={"limit": limit},
+            status=413,
+        )
+    if not data:
+        raise LifecycleError(USAGE, "the evidence is empty")
+    return data
 
 
 # --------------------------------------------------------------------------- #
@@ -320,6 +449,213 @@ class LifecycleService:
                 f"({', '.join(self.settings.effective_sources()) or 'none configured'})",
             )
 
+    # -- who may write ---------------------------------------------------------- #
+
+    def may_write(self, meta: BrainMeta, actor_id: str | None, admin: bool) -> bool:
+        """Whether *actor_id* may write the brain *meta* describes (scopes aside)."""
+        if self.settings.brain_access != OWNERS or admin:
+            return True
+        return bool(actor_id) and actor_id in meta.owners()
+
+    def require_write_access(
+        self, handle: BrainHandle, actor: Actor, admin: bool = False
+    ) -> None:
+        """``refused_policy`` unless *actor* may write *handle*'s brain."""
+        meta = handle.meta
+        if self.may_write(meta, actor.id, admin):
+            return
+        if meta.created_by:
+            grant = (
+                f"its owner ({meta.created_by}) or an administrator (brains:admin) "
+                f"can grant access with PUT /v1/brains/{handle.reference}/writers"
+            )
+        else:
+            grant = (
+                "it has no recorded owner, so only an administrator (brains:admin) "
+                f"can grant access with PUT /v1/brains/{handle.reference}/writers"
+            )
+        raise LifecycleError(
+            REFUSED_POLICY,
+            f"{actor.id} may not write {handle.reference}: only its owner and its "
+            f"writers may; {grant}",
+            detail={"access": OWNERS, "owners": meta.owners()},
+        )
+
+    def writers(self, handle: BrainHandle) -> dict[str, Any]:
+        meta = handle.meta
+        return {
+            "reference": handle.reference,
+            "owner": meta.created_by or None,
+            "writers": list(meta.writers),
+            "access": self.settings.brain_access,
+        }
+
+    def set_writers(
+        self,
+        handle: BrainHandle,
+        writers: list[str],
+        *,
+        actor: Actor,
+        admin: bool = False,
+    ) -> dict[str, Any]:
+        """Replace who besides the owner may write the brain (owner or admin only)."""
+        owner = handle.meta.created_by
+        if not admin and not (owner and actor.id == owner):
+            raise LifecycleError(
+                REFUSED_POLICY,
+                f"only the owner of {handle.reference} "
+                f"({owner or 'none recorded'}) or an administrator (brains:admin) "
+                f"may change who writes it",
+                detail={"access": self.settings.brain_access, "owner": owner or None},
+            )
+        chosen: list[str] = []
+        invalid: list[str] = []
+        for raw in writers:
+            value = raw.strip().lower() if isinstance(raw, str) else ""
+            if not value or not is_actor_id(value):
+                invalid.append(str(raw))
+            elif value not in chosen:
+                chosen.append(value)
+        if invalid:
+            raise LifecycleError(
+                USAGE,
+                f"not actor ids (an address, or a namespaced name such as "
+                f"sso.example.com/<sub>): {invalid}",
+                detail={"invalid": invalid},
+            )
+
+        def change(meta: BrainMeta) -> None:
+            meta.writers = chosen
+
+        handle.update_meta(change)
+        logger.info(
+            "Working store: {} set the writers of {} to {}",
+            actor.id,
+            handle.reference,
+            chosen,
+        )
+        return self.writers(handle)
+
+    def list_held(
+        self,
+        *,
+        actor_id: str | None,
+        admin: bool,
+        can_write: bool,
+        cursor: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Brains in the working store, by reference; under ``owners`` only writable ones."""
+        limit = max(1, min(limit, 100))
+        metas = sorted(self.store.list(), key=lambda m: m.reference)
+        if self.settings.brain_access == OWNERS and not admin:
+            metas = [m for m in metas if actor_id and actor_id in m.owners()]
+        if cursor:
+            last = _decode_cursor(cursor)
+            metas = [m for m in metas if m.reference > last]
+        page = metas[:limit]
+        more = len(metas) > limit
+        return {
+            "entries": [
+                {
+                    "reference": m.reference,
+                    "default_tag": m.default_tag,
+                    "title": m.title,
+                    "description": m.description,
+                    "created_at": m.created_at,
+                    "created_by": m.created_by,
+                    "imported_from": m.imported_from,
+                    "owner": m.created_by or None,
+                    "writers": list(m.writers),
+                    "writable": can_write and self.may_write(m, actor_id, admin),
+                }
+                for m in page
+            ],
+            "next_cursor": _encode_cursor(page[-1].reference)
+            if more and page
+            else None,
+        }
+
+    # -- the open convergence -------------------------------------------------- #
+
+    def open_convergence(
+        self, handle: BrainHandle, brain: Brain | None = None
+    ) -> dict[str, Any] | None:
+        """The open convergence, read off the pointers (``None`` when none is open).
+
+        pyboltzmann records who opened it and the snapshot it joins; what the
+        client named as the source and when it started come from the brain's
+        meta, recorded when a converge job left it open (and only trusted while
+        it describes the same reconciliation).
+        """
+        store = brain.store if brain is not None else handle.store()
+        raw = store.read_pointer(RECONCILE_POINTER)
+        if not raw:
+            return None
+        state = ReconcileState.model_validate(parse_json_strict(raw))
+        recorded = handle.meta.convergence or {}
+        if recorded.get("head") != str(state.head):
+            recorded = {}
+        return {
+            "branch": handle.heads().current,
+            "actor": state.actor.id if state.actor is not None else None,
+            "theirs": recorded.get("theirs") or str(state.theirs),
+            "theirs_snapshot": str(state.theirs),
+            "strategy": state.strategy.value,
+            "reason": state.reason,
+            "started_at": recorded.get("started_at"),
+            "head": str(state.head),
+        }
+
+    def refuse_if_converging(
+        self, handle: BrainHandle, brain: Brain | None = None
+    ) -> None:
+        """``needs_human`` while a convergence is open: it blocks every branch."""
+        brief = self.open_convergence(handle, brain)
+        if brief is not None:
+            raise self._converging(brief)
+
+    @staticmethod
+    def _converging(
+        brief: dict[str, Any], message: str | None = None
+    ) -> LifecycleError:
+        return LifecycleError(
+            NEEDS_HUMAN,
+            message
+            or (
+                f"a convergence of {brief['theirs']} into {brief['branch']!r} "
+                f"(opened by {brief['actor'] or 'unknown'}) is open on this brain; "
+                f"while it is, no branch of the brain can be written. Resolve it via "
+                f"/convergence, then continue or abort"
+            ),
+            detail={"convergence": brief},
+        )
+
+    def _require_settle_rights(
+        self, handle: BrainHandle, brief: dict[str, Any], actor: Actor, admin: bool
+    ) -> None:
+        """Who may settle an open convergence: who opened it, the owner, an admin."""
+        if self.settings.brain_access != OWNERS or admin:
+            return
+        allowed = [a for a in (brief.get("actor"), handle.meta.created_by) if a]
+        if actor.id in allowed:
+            return
+        raise LifecycleError(
+            REFUSED_POLICY,
+            f"only whoever opened this convergence ({brief.get('actor') or 'unknown'}), "
+            f"the owner of {handle.reference} ({handle.meta.created_by or 'none recorded'}) "
+            f"or an administrator (brains:admin) may settle it",
+            detail={"access": OWNERS, "convergence": brief, "allowed": allowed},
+        )
+
+    def _record_convergence(
+        self, handle: BrainHandle, record: dict[str, Any] | None
+    ) -> None:
+        def change(meta: BrainMeta) -> None:
+            meta.convergence = record
+
+        handle.update_meta(change)
+
     # -- create ---------------------------------------------------------------- #
 
     def create(
@@ -355,20 +691,13 @@ class LifecycleService:
         snapshot = handle.snapshot(head.snapshot) if head is not None else None
         store = handle.store()
         convergence = None
-        raw = store.read_pointer("reconcile")
+        raw = store.read_pointer(RECONCILE_POINTER)
         if raw:
-            from boltzmann.identity.serialization import parse_json_strict
-            from boltzmann.reconcile import ReconcileState
-
             state = ReconcileState.model_validate(parse_json_strict(raw))
+            brief = self.open_convergence(handle) or {}
             convergence = {
                 "open": True,
-                "theirs": str(state.theirs),
-                "strategy": state.strategy.value,
-                "reason": state.reason,
-                "actor": state.actor.id,
-                "head": str(state.head),
-                "branch": heads.current,
+                **brief,
                 "resolutions": len(state.resolutions),
             }
         main = heads.branches.get(DEFAULT_BRANCH)
@@ -391,6 +720,9 @@ class LifecycleService:
             "created_at": meta.created_at,
             "created_by": meta.created_by,
             "imported_from": meta.imported_from,
+            "owner": meta.created_by or None,
+            "writers": list(meta.writers),
+            "access": self.settings.brain_access,
             "governed": bool(snapshot and snapshot.trust_root is not None),
             "read_only": bool(snapshot and snapshot.trust_root is not None),
             "branch": chosen,
@@ -724,24 +1056,61 @@ class LifecycleService:
         fn: Callable[[Brain], Any],
         *,
         actor: Actor,
+        admin: bool = False,
         branch: str | None = None,
         if_match: str | None = None,
         assisted_by: list[Collaborator] | None = None,
         switch: bool = True,
+        settle: bool = False,
+        settle_branch: str | None = None,
     ) -> Any:
+        """Run *fn* on the writable brain under its write lock.
+
+        An ordinary write needs write access to the brain, is refused while a
+        convergence is open (``needs_human``), switches to *branch* and checks
+        *if_match*. A *settle* write acts on the open convergence instead: it
+        needs one to be open (``not_found``), on *settle_branch* when given
+        (``usage``), and the right to settle it.
+        """
+        if not settle:
+            # Before waiting for the lock: a refusal should not queue.
+            self.require_write_access(handle, actor, admin)
         async with handle.writing(what):
 
             def run() -> Any:
                 brain = handle.writer()
-                if switch:
-                    self._switch_to(handle, brain, branch or DEFAULT_BRANCH)
-                # After the switch: governance is a property of the branch's head.
-                self._require_writable(brain)
-                self._check_if_match(brain, if_match)
+                if settle:
+                    self._require_writable(brain)
+                    self._check_if_match(brain, if_match)
+                    brief = self.open_convergence(handle, brain)
+                    if brief is None or brain.state() == {}:
+                        raise LifecycleError(
+                            NOT_FOUND, "no convergence is open on this brain"
+                        )
+                    if settle_branch is not None and settle_branch != brief["branch"]:
+                        raise LifecycleError(
+                            USAGE,
+                            f"the convergence is open on {brief['branch']!r}, not on "
+                            f"{settle_branch!r}",
+                            detail={"convergence": brief},
+                        )
+                    self._require_settle_rights(handle, brief, actor, admin)
+                else:
+                    self.refuse_if_converging(handle, brain)
+                    if switch:
+                        self._switch_to(handle, brain, branch or DEFAULT_BRANCH)
+                    # After the switch: governance is a property of the branch's head.
+                    self._require_writable(brain)
+                    self._check_if_match(brain, if_match)
                 brain.actor = actor
                 brain.assisted_by = list(assisted_by or [])
                 try:
                     return fn(brain)
+                except (ReconciliationHaltedError, ReconciliationBlockedError) as exc:
+                    brief = self.open_convergence(handle, brain)
+                    if brief is None:
+                        raise
+                    raise self._converging(brief, str(exc)) from exc
                 finally:
                     brain.actor = reader_actor()
                     brain.assisted_by = []
@@ -773,6 +1142,7 @@ class LifecycleService:
         license: str | None = None,
         branch: str | None = None,
         if_match: str | None = None,
+        admin: bool = False,
     ) -> dict[str, Any]:
         if not data:
             raise LifecycleError(USAGE, "the evidence is empty")
@@ -801,6 +1171,7 @@ class LifecycleService:
             "registering evidence",
             op,
             actor=actor,
+            admin=admin,
             branch=branch,
             if_match=if_match,
         )
@@ -810,7 +1181,7 @@ class LifecycleService:
         handle: BrainHandle,
         *,
         actor: Actor,
-        source: str,
+        source: str | None = None,
         candidates: list[dict[str, Any]],
         producer: dict[str, Any] | None,
         allowed: list[str] | None = None,
@@ -821,16 +1192,52 @@ class LifecycleService:
         dry_run: bool = False,
         branch: str | None = None,
         if_match: str | None = None,
+        evidence: bytes | None = None,
+        evidence_media_type: str | None = None,
+        evidence_origin: str | None = None,
+        admin: bool = False,
     ) -> dict[str, Any]:
         """Validate client-proposed candidates and, unless a dry run, commit them.
 
         All or nothing: a commit whose candidates did not all validate writes
         nothing and is ``rejected_candidates``, with every verdict, so the
         client can drop or fix the rejected ones and commit again.
+
+        The source is either *source* (a canonical block already held) or the
+        bytes of *evidence*, registered in the same write: candidates are
+        validated against the brain as it would be with the evidence added,
+        without writing it, and the evidence is registered only when the
+        commit goes ahead (then two snapshots are written: the registration
+        and the commit). Candidates may cite it as ``$source``. A rejection or
+        a dry run leaves the brain exactly as it was.
         """
-        source_id = _parse_block_id(source)
+        if (source is None) == (evidence is None):
+            raise LifecycleError(
+                USAGE, "give exactly one of source and evidence_inline"
+            )
+        request: RegistrationRequest | None = None
+        prospective: CanonicalBlock | None = None
+        if evidence is not None:
+            if not evidence:
+                raise LifecycleError(USAGE, "the evidence is empty")
+            try:
+                request = RegistrationRequest(
+                    media_type=evidence_media_type or "application/octet-stream",
+                    actor=actor,
+                    origin=evidence_origin,
+                )
+            except Exception as exc:  # noqa: BLE001 - pydantic detail is the message
+                raise LifecycleError(USAGE, f"invalid evidence: {exc}") from exc
+            prospective = canonical_block_for(evidence, request)
+            source_id = prospective.block_id
+        else:
+            assert source is not None
+            source_id = _parse_block_id(source)
         try:
-            parsed = [Candidate.model_validate(c) for c in candidates]
+            parsed = [
+                Candidate.model_validate(_substitute_source(c, str(source_id)))
+                for c in candidates
+            ]
         except Exception as exc:  # noqa: BLE001 - pydantic detail is the message
             raise LifecycleError(USAGE, f"invalid candidates: {exc}") from exc
         if not parsed:
@@ -870,25 +1277,57 @@ class LifecycleService:
                 allowed_types = [MemoryType(v) for v in allowed]
             except ValueError as exc:
                 raise LifecycleError(USAGE, f"unknown memory type: {exc}") from exc
+        candidate_set = CandidateSet(
+            task_id=task_id, producer=produced_by, candidates=parsed
+        )
 
         def op(brain: Brain) -> dict[str, Any]:
-            task = brain.define_task(
-                source_id,
-                allowed=allowed_types,
-                requirements=requirements,
-                instructions=instructions,
-                task_id=task_id,
-            )
-            report = brain.validate(
-                CandidateSet(task_id=task_id, producer=produced_by, candidates=parsed),
-                task,
-            )
+            duplicate = True
+            if prospective is not None:
+                held = brain.state() and brain.snapshot().has_module(
+                    MemoryType.CANONICAL
+                )
+                duplicate = bool(
+                    held and prospective.block_id in brain.module(MemoryType.CANONICAL)
+                )
+            if duplicate:
+                task = brain.define_task(
+                    source_id,
+                    allowed=allowed_types,
+                    requirements=requirements,
+                    instructions=instructions,
+                    task_id=task_id,
+                )
+                report = brain.validate(candidate_set, task)
+            else:
+                assert prospective is not None
+                # Validate against the modules as they would be with the
+                # evidence registered -- nothing is written yet.
+                task = extraction_task(
+                    source_id,
+                    allowed=allowed_types,
+                    requirements=requirements,
+                    instructions=instructions,
+                    task_id=task_id,
+                )
+                report = validate_candidates(
+                    candidate_set,
+                    task,
+                    prospective_modules(brain, prospective),
+                    brain.validators,
+                )
             view = _report_view(report)
+            inline: dict[str, Any] = (
+                {"source": str(source_id), "evidence_duplicate": duplicate}
+                if prospective is not None
+                else {}
+            )
             if dry_run:
                 return {
                     "dry_run": True,
                     "report": view,
                     "head": self._head_after(brain),
+                    **inline,
                 }
             if not report.is_clean:
                 raise LifecycleError(
@@ -898,10 +1337,18 @@ class LifecycleService:
                     f"committed",
                     detail={"report": view},
                 )
+            if not duplicate:
+                assert evidence is not None and request is not None
+                registered = brain.register(evidence, request)
+                if registered.block_id != source_id:  # pragma: no cover - pinned
+                    raise RuntimeError(
+                        f"registered {registered.block_id}, expected {source_id}"
+                    )
             result = brain.commit(report)
             committed = []
             for item in report.committable:
                 block = item.block
+                assert block is not None  # committable guarantees it
                 committed.append(
                     {
                         "block_id": str(block.block_id),
@@ -918,6 +1365,7 @@ class LifecycleService:
                 "roots": {mt.value: str(r) for mt, r in result.roots.items()},
                 "head": self._head_after(brain),
                 "branch": branch or DEFAULT_BRANCH,
+                **inline,
             }
 
         return await self._write(
@@ -925,6 +1373,7 @@ class LifecycleService:
             "validating" if dry_run else "committing",
             op,
             actor=actor,
+            admin=admin,
             branch=branch,
             if_match=if_match,
             assisted_by=collaborators,
@@ -975,6 +1424,7 @@ class LifecycleService:
         actor: Actor,
         start: str | None = None,
         if_match: str | None = None,
+        admin: bool = False,
     ) -> dict[str, Any]:
         """Name a new branch at *start* (a branch, a snapshot, or the current head).
 
@@ -1014,7 +1464,12 @@ class LifecycleService:
             }
 
         return await self._write(
-            handle, f"creating branch {name}", op, actor=actor, switch=False
+            handle,
+            f"creating branch {name}",
+            op,
+            actor=actor,
+            admin=admin,
+            switch=False,
         )
 
     async def delete_branch(
@@ -1025,6 +1480,7 @@ class LifecycleService:
         actor: Actor,
         force: bool = False,
         if_match: str | None = None,
+        admin: bool = False,
     ) -> dict[str, Any]:
         """Delete branch *name*; *if_match* is checked against its head."""
         if name == DEFAULT_BRANCH:
@@ -1047,7 +1503,12 @@ class LifecycleService:
             }
 
         return await self._write(
-            handle, f"deleting branch {name}", op, actor=actor, switch=False
+            handle,
+            f"deleting branch {name}",
+            op,
+            actor=actor,
+            admin=admin,
+            switch=False,
         )
 
     # -- distribution (jobs) ---------------------------------------------------- #
@@ -1063,9 +1524,11 @@ class LifecycleService:
         actor: Actor,
         force: bool = False,
         if_match: str | None = None,
+        admin: bool = False,
     ) -> Job:
         """Publish *branch* to its tag; *if_match* is checked against its head."""
         self._require_source(handle.reference)
+        self.require_write_access(handle, actor, admin)
 
         async def body(ctx: JobContext) -> dict[str, Any]:
             tag = tag_for_branch(handle.meta, branch)
@@ -1074,7 +1537,13 @@ class LifecycleService:
 
                 def prepare() -> Brain:
                     brain = handle.writer()
-                    self._switch_to(handle, brain, branch)
+                    try:
+                        self._switch_to(handle, brain, branch)
+                    except ReconciliationHaltedError as exc:
+                        brief = self.open_convergence(handle, brain)
+                        if brief is None:
+                            raise
+                        raise self._converging(brief) from exc
                     if brain.state() == {}:
                         raise LifecycleError(
                             REFUSED_PROTOCOL, "the brain has no history to push"
@@ -1150,6 +1619,7 @@ class LifecycleService:
         tag: str | None = None,
         branch: str | None = None,
         if_match: str | None = None,
+        admin: bool = False,
     ) -> Job:
         """Install a published tag: main's by default, or the one a branch publishes to.
 
@@ -1158,6 +1628,8 @@ class LifecycleService:
         current one).
         """
         self._require_source(handle.reference)
+        self.require_write_access(handle, actor, admin)
+        self.refuse_if_converging(handle)
         if tag is None:
             tag = tag_for_branch(handle.meta, branch or DEFAULT_BRANCH)
         target = branch or branch_for_tag(tag, handle.meta.default_tag)
@@ -1203,11 +1675,15 @@ class LifecycleService:
 
         def prepare() -> Brain:
             brain = handle.writer()
-            if brain.state() and brain.reconcile_status() is not None:
-                raise LifecycleError(
-                    NEEDS_HUMAN,
-                    "a convergence is open; pulling would move the head out from under it",
-                )
+            if brain.state():
+                brief = self.open_convergence(handle, brain)
+                if brief is not None:
+                    raise self._converging(
+                        brief,
+                        "a convergence is open; pulling would move the head out "
+                        "from under it. Resolve it via /convergence, then continue "
+                        "or abort",
+                    )
             if if_match is not None:
                 name = target or brain.current_branch()
                 self._check_head(self._branch_head(brain, name), if_match)
@@ -1270,6 +1746,7 @@ class LifecycleService:
         reason: str | None = None,
         fast_forward: str = "auto",
         if_match: str | None = None,
+        admin: bool = False,
     ) -> Job:
         """Bring *source* into branch *into*.
 
@@ -1295,6 +1772,8 @@ class LifecycleService:
                 ) from exc
         if fast_forward not in ("auto", "only", "never"):
             raise LifecycleError(USAGE, "fast_forward must be auto, only or never")
+        self.require_write_access(handle, actor, admin)
+        self.refuse_if_converging(handle)
 
         async def body(ctx: JobContext) -> dict[str, Any]:
             ctx.stage("waiting for the brain")
@@ -1304,6 +1783,7 @@ class LifecycleService:
 
                 def prepare() -> tuple[Brain, set[str]]:
                     opened = handle.writer()
+                    self.refuse_if_converging(handle, opened)
                     self._switch_to(handle, opened, into)
                     self._require_writable(opened)
                     self._check_if_match(opened, if_match)
@@ -1347,6 +1827,7 @@ class LifecycleService:
 
                     def join() -> dict[str, Any]:
                         return self._join(
+                            handle,
                             joining,
                             branch_name,
                             chosen,
@@ -1387,8 +1868,9 @@ class LifecycleService:
             },
         )
 
-    @staticmethod
     def _join(
+        self,
+        handle: BrainHandle,
         brain: Brain,
         branch_name: str,
         chosen: ReconcileStrategy | None,
@@ -1410,11 +1892,26 @@ class LifecycleService:
             )
         except ReconciliationHaltedError as exc:
             status = brain.reconcile_status()
+            # pyboltzmann records who opened it; the source as the client named
+            # it, and when, are the service's to remember.
+            self._record_convergence(
+                handle,
+                {
+                    "branch": into,
+                    "actor": actor.id,
+                    "theirs": source,
+                    "strategy": chosen.value if chosen else None,
+                    "reason": reason,
+                    "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "head": str(status.state.head) if status is not None else None,
+                },
+            )
+            brief = self.open_convergence(handle, brain) or {}
             raise LifecycleError(
                 NEEDS_HUMAN,
                 f"converging {source} into {into} stopped with questions open; "
                 f"resolve them via /convergence, then continue or abort",
-                detail={"convergence": _dump(status)},
+                detail={"convergence": {**(_dump(status) or {}), **brief}},
             ) from exc
         except BranchError as exc:
             if chosen is None and "diverged" in str(exc):
@@ -1475,9 +1972,15 @@ class LifecycleService:
         status = handle.fresh_reader().reconcile_status()
         if status is None:
             return {"open": False}
+        brief = self.open_convergence(handle) or {}
         return {
             "open": True,
             "branch": heads.current,
+            "actor": brief.get("actor"),
+            "theirs": brief.get("theirs"),
+            "strategy": brief.get("strategy"),
+            "reason": brief.get("reason"),
+            "started_at": brief.get("started_at"),
             "resolved": status.is_resolved,
             "unresolved": [str(b) for b in status.unresolved],
             "removals_accepted": status.removals_accepted,
@@ -1491,18 +1994,25 @@ class LifecycleService:
         fn: Callable[[Brain], Any],
         *,
         actor: Actor,
+        admin: bool = False,
+        branch: str | None = None,
         if_match: str | None = None,
     ) -> Any:
-        """A write to the open convergence; *if_match* is the current branch head."""
+        """A write to the open convergence; *if_match* is the current branch head.
 
-        def op(brain: Brain) -> Any:
-            if brain.state() == {} or brain.reconcile_status() is None:
-                raise LifecycleError(NOT_FOUND, "no convergence is open on this brain")
-            return fn(brain)
-
+        *branch*, when given, must be the branch the convergence is open on.
+        """
         try:
             return await self._write(
-                handle, what, op, actor=actor, switch=False, if_match=if_match
+                handle,
+                what,
+                fn,
+                actor=actor,
+                admin=admin,
+                switch=False,
+                if_match=if_match,
+                settle=True,
+                settle_branch=branch,
             )
         finally:
             handle.forget_readers()
@@ -1517,6 +2027,8 @@ class LifecycleService:
         prefer: str | None = None,
         reason: str | None = None,
         if_match: str | None = None,
+        branch: str | None = None,
+        admin: bool = False,
     ) -> dict[str, Any]:
         bid = _parse_block_id(block)
         try:
@@ -1538,7 +2050,13 @@ class LifecycleService:
             }
 
         return await self._convergence_write(
-            handle, f"resolving {bid.short}", fn, actor=actor, if_match=if_match
+            handle,
+            f"resolving {bid.short}",
+            fn,
+            actor=actor,
+            admin=admin,
+            branch=branch,
+            if_match=if_match,
         )
 
     async def accept_removals(
@@ -1548,6 +2066,8 @@ class LifecycleService:
         actor: Actor,
         reason: str | None = None,
         if_match: str | None = None,
+        branch: str | None = None,
+        admin: bool = False,
     ) -> dict[str, Any]:
         def fn(brain: Brain) -> dict[str, Any]:
             status = brain.reconcile_accept_removals(reason=reason, actor=actor)
@@ -1558,14 +2078,27 @@ class LifecycleService:
             }
 
         return await self._convergence_write(
-            handle, "accepting removals", fn, actor=actor, if_match=if_match
+            handle,
+            "accepting removals",
+            fn,
+            actor=actor,
+            admin=admin,
+            branch=branch,
+            if_match=if_match,
         )
 
     async def continue_convergence(
-        self, handle: BrainHandle, *, actor: Actor, if_match: str | None = None
+        self,
+        handle: BrainHandle,
+        *,
+        actor: Actor,
+        if_match: str | None = None,
+        branch: str | None = None,
+        admin: bool = False,
     ) -> dict[str, Any]:
         def fn(brain: Brain) -> dict[str, Any]:
             result = brain.reconcile_continue()
+            self._record_convergence(handle, None)
             return {
                 "outcome": "reconciled",
                 "snapshot": str(result.snapshot.digest),
@@ -1582,15 +2115,28 @@ class LifecycleService:
             }
 
         return await self._convergence_write(
-            handle, "continuing convergence", fn, actor=actor, if_match=if_match
+            handle,
+            "continuing convergence",
+            fn,
+            actor=actor,
+            admin=admin,
+            branch=branch,
+            if_match=if_match,
         )
 
     async def abort_convergence(
-        self, handle: BrainHandle, *, actor: Actor, if_match: str | None = None
+        self,
+        handle: BrainHandle,
+        *,
+        actor: Actor,
+        if_match: str | None = None,
+        branch: str | None = None,
+        admin: bool = False,
     ) -> dict[str, Any]:
         def fn(brain: Brain) -> dict[str, Any]:
             status = brain.reconcile_status()
             brain.reconcile_abort()
+            self._record_convergence(handle, None)
             return {
                 "aborted": True,
                 "theirs": str(status.state.theirs) if status else None,
@@ -1598,7 +2144,13 @@ class LifecycleService:
             }
 
         return await self._convergence_write(
-            handle, "aborting convergence", fn, actor=actor, if_match=if_match
+            handle,
+            "aborting convergence",
+            fn,
+            actor=actor,
+            admin=admin,
+            branch=branch,
+            if_match=if_match,
         )
 
     # -- import --------------------------------------------------------------- #
@@ -1613,6 +2165,7 @@ class LifecycleService:
         default_tag: str | None = None,
         title: str = "",
         description: str = "",
+        admin: bool = False,
     ) -> Job:
         """Migrate a published brain into the working store.
 
@@ -1629,6 +2182,7 @@ class LifecycleService:
             self._require_source(src_ref)
         else:
             src_ref, src_tag = reference, tag or ref_tag or default_tag or "latest"
+        self._before_import(reference, actor, admin)
         handle = self.store.create(
             BrainMeta(
                 reference=reference,
@@ -1655,6 +2209,17 @@ class LifecycleService:
             cleanup=self._discard_if_empty(handle),
         )
 
+    def _before_import(self, reference: str, actor: Actor, admin: bool) -> None:
+        """Refuse an import that could not run, before it creates the brain.
+
+        An import into a brain already held needs write access to it (it is
+        then refused as existing, ``usage``); none starts while shutting down.
+        """
+        self.jobs.ensure_accepting()
+        existing = self.store.find(reference)
+        if existing is not None:
+            self.require_write_access(existing, actor, admin)
+
     def _discard_if_empty(self, handle: BrainHandle) -> Callable[[], Awaitable[None]]:
         """A failed or cancelled import leaves nothing behind.
 
@@ -1677,6 +2242,7 @@ class LifecycleService:
         default_tag: str | None = None,
         title: str = "",
         description: str = "",
+        admin: bool = False,
     ) -> Job:
         """Migrate a brain from an uploaded OCI layout (a ``.tar`` or ``.tar.gz``).
 
@@ -1688,6 +2254,7 @@ class LifecycleService:
         """
         reference, ref_tag = self.repository(brain_ref)
         self._require_source(reference)
+        self._before_import(reference, actor, admin)
         handle = self.store.create(
             BrainMeta(
                 reference=reference,
