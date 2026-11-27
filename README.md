@@ -22,7 +22,7 @@ Implemented and tested:
 ## Development
 
 ```bash
-uv venv --python 3.12 .venv
+uv venv --python 3.13 .venv
 uv pip install --python .venv/bin/python -e ".[dev]"
 .venv/bin/pytest
 .venv/bin/ruff check src tests
@@ -30,7 +30,7 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 
 Runtime requirements:
 
-- Python 3.12
+- Python 3.13
 - The `oras` CLI (registry credentials with push rights on the writer replica)
 - `cosign` when `GBMS_SIGNATURE_POLICY` is not `off`
 - A volume for `GBMS_STORE_ROOT` on the writer replica

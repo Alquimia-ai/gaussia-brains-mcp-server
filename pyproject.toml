@@ -9,7 +9,7 @@ description = "Standalone MCP + REST service owning the Boltzmann Brain lifecycl
 readme = "README.md"
 license = {text = "GNU General Public License v3.0"}
 authors = [{name = "Alquimia AI", email = "info@alquimia.ai"}]
-requires-python = "==3.12.*"
+requires-python = ">=3.13,<3.14"
 classifiers = ["Private :: Do Not Upload"]
 
 dependencies = [
@@ -63,7 +63,7 @@ addopts = ["--tb=short", "-q"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py312"
+target-version = "py313"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
